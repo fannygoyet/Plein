@@ -150,6 +150,10 @@
 
 <!-- ===== STATS ===== -->
 <section id="tab-stats" class="tab-panel">
+  <button type="button" class="stats-charts-link" id="open-charts-btn">
+    <span>📊 Voir les graphiques</span>
+    <span class="chev">›</span>
+  </button>
   <div class="stat-grid" id="stat-grid"></div>
 </section>
 
@@ -281,6 +285,19 @@
     <span class="tab-label">Données</span>
   </button>
 </nav>
+
+<!-- Sheet iOS de détail (slide-up depuis le bas) -->
+<div class="sheet-backdrop hidden" id="detail-sheet">
+  <div class="sheet">
+    <div class="sheet-grabber"></div>
+    <div class="sheet-header">
+      <span class="sheet-side"></span>
+      <h2 class="sheet-title" id="sheet-title">Détail</h2>
+      <button type="button" class="sheet-close" id="sheet-close" aria-label="Fermer">OK</button>
+    </div>
+    <div class="sheet-body" id="sheet-body"></div>
+  </div>
+</div>
 
 <div id="toast" class="toast"></div>
 

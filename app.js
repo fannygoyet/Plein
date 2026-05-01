@@ -1,6 +1,6 @@
 /* Mes Pleins — design iOS natif (Settings.app / Health) */
 
-const VERSION = "1.3.0";
+const VERSION = "1.4.0";
 const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
 const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
@@ -214,7 +214,8 @@ function renderDashboard() {
     if (!tile) return "";
     const html = renderTile(id);
     if (!html) return "";
-    return `<div class="tile ${tile.size === "wide" ? "wide" : ""} ${tile.size === "hero" ? "hero" : ""}" data-tile="${id}" draggable="true">
+    const drillable = ["year", "month", "rolling12", "conso"].includes(id);
+    return `<div class="tile ${tile.size === "wide" ? "wide" : ""} ${tile.size === "hero" ? "hero" : ""} ${drillable ? "clickable" : ""}" data-tile="${id}" draggable="true">
       <span class="tile-remove" data-remove="${id}">−</span>
       ${html}
     </div>`;
@@ -267,9 +268,9 @@ function renderTile(id) {
     case "year": {
       if (!stats) return null;
       return `
-        <div class="tile-label"><span class="tile-icon bg-indigo">▲</span>${today.getFullYear()}</div>
+        <div class="tile-label"><span class="tile-emoji">📅</span>${today.getFullYear()}</div>
         <div class="tile-value">${fmtNum(stats.kmYTD || 0)}<span class="unit">km</span></div>
-        <div class="tile-sub">depuis le 1ᵉʳ janvier</div>`;
+        <div class="tile-sub">depuis le 1ᵉʳ janvier · voir détail ›</div>`;
     }
     case "month": {
       if (!stats) return null;
@@ -277,23 +278,49 @@ function renderTile(id) {
       const km = kmSincePeriod([...ap].sort((a, b) => (a.date < b.date ? -1 : 1)), mStart);
       const monthName = today.toLocaleDateString("fr-FR", { month: "long" });
       return `
-        <div class="tile-label"><span class="tile-icon bg-teal">↻</span>Ce mois</div>
+        <div class="tile-label"><span class="tile-emoji">📆</span>Ce mois</div>
         <div class="tile-value">${fmtNum(km || 0)}<span class="unit">km</span></div>
-        <div class="tile-sub">en ${monthName}</div>`;
+        <div class="tile-sub">en ${monthName} · voir détail ›</div>`;
     }
     case "rolling12": {
       if (!stats || stats.km12Months == null) return null;
       return `
-        <div class="tile-label"><span class="tile-icon bg-purple">↻</span>12 mois</div>
+        <div class="tile-label"><span class="tile-emoji">🗓</span>12 mois glissants</div>
         <div class="tile-value">${fmtNum(stats.km12Months)}<span class="unit">km</span></div>
-        <div class="tile-sub">glissants</div>`;
+        <div class="tile-sub">depuis ${fmtDate(stats.rolling12Start)} · voir détail ›</div>`;
     }
     case "conso": {
-      if (!stats || stats.consoMoyenne == null) return null;
+      // Dernière conso entre 2 pleins + moyenne 12 mois glissants
+      const chrono = [...ap].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.km - b.km));
+      let lastConso = null;
+      for (let i = chrono.length - 1; i > 0; i--) {
+        const dKm = chrono[i].km - chrono[i - 1].km;
+        const c = consoForPlein(chrono[i], chrono[i - 1]);
+        if (c != null && dKm >= 250 && c < 15) { lastConso = c; break; }
+      }
+      // Moyenne 12 mois glissants (depuis 12 mois en arrière jour pour jour)
+      const cutoff = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+      const recent = chrono.filter((p) => p.date >= cutoff);
+      let avg12 = null;
+      if (recent.length >= 2) {
+        const segs = buildSegments(recent);
+        let sL = 0, sK = 0;
+        for (const s of segs) {
+          if (s.length < 2) continue;
+          sL += s.slice(1).reduce((a, p) => a + (Number(p.litres) || 0), 0);
+          sK += s[s.length - 1].km - s[0].km;
+        }
+        if (sK > 0) avg12 = (sL / sK) * 100;
+      }
+      const main = lastConso != null ? `${fmtNum(lastConso, 2)}<span class="unit">L/100</span>`
+                                     : (stats && stats.consoMoyenne ? `${fmtNum(stats.consoMoyenne, 2)}<span class="unit">L/100</span>` : "—");
+      const subLine = lastConso != null
+        ? `dernier plein${avg12 != null ? ` · moy 12 mois : ${fmtNum(avg12, 2)} L/100` : ""}`
+        : "moyenne globale";
       return `
-        <div class="tile-label"><span class="tile-icon bg-red">▾</span>Conso</div>
-        <div class="tile-value">${fmtNum(stats.consoMoyenne, 2)}<span class="unit">L/100</span></div>
-        <div class="tile-sub">moyenne globale</div>`;
+        <div class="tile-label"><span class="tile-emoji">⛽</span>Conso</div>
+        <div class="tile-value">${main}</div>
+        <div class="tile-sub">${subLine} · voir détail ›</div>`;
     }
     case "lastFill": {
       if (ap.length === 0) return null;
@@ -1033,16 +1060,211 @@ $("#dashboard").addEventListener("click", (e) => {
     hideTile(remove.dataset.remove);
     return;
   }
-  // Hors mode édition : un tap sur la tuile "Dernier plein" ou "Prochain plein"
-  // ouvre l'onglet ajout pour confort
+  // Hors mode édition : tap sur certaines tuiles ouvre une sheet de détail
+  // ou redirige vers l'onglet d'ajout pour confort.
   if (!editMode) {
     const tile = e.target.closest("[data-tile]");
     if (!tile) return;
-    if (tile.dataset.tile === "nextFill" || tile.dataset.tile === "lastFill") {
+    const id = tile.dataset.tile;
+    if (id === "nextFill" || id === "lastFill") {
       showTab("add");
+    } else if (id === "year" || id === "month" || id === "rolling12" || id === "conso") {
+      openDetailSheet(id);
     }
   }
 });
+
+// Bouton "Voir les graphiques" depuis l'onglet Stats
+const openChartsBtn = $("#open-charts-btn");
+if (openChartsBtn) openChartsBtn.addEventListener("click", () => showTab("charts"));
+
+// ===== Sheet de détail (drill-down depuis une tuile) =====
+const detailSheet = $("#detail-sheet");
+const sheetTitle = $("#sheet-title");
+const sheetBody = $("#sheet-body");
+const sheetClose = $("#sheet-close");
+let sheetChart = null;
+function destroySheetChart() {
+  if (sheetChart) { sheetChart.destroy(); sheetChart = null; }
+}
+function closeDetailSheet() {
+  destroySheetChart();
+  detailSheet.classList.remove("open");
+  setTimeout(() => detailSheet.classList.add("hidden"), 280);
+  document.body.style.overflow = "";
+}
+sheetClose.addEventListener("click", closeDetailSheet);
+detailSheet.addEventListener("click", (e) => {
+  if (e.target === detailSheet) closeDetailSheet();
+});
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !detailSheet.classList.contains("hidden")) closeDetailSheet();
+});
+
+function openDetailSheet(kind) {
+  const ap = activePleins();
+  if (ap.length === 0) return;
+  const chrono = [...ap].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.km - b.km));
+  destroySheetChart();
+  sheetBody.innerHTML = "";
+
+  if (kind === "year") {
+    sheetTitle.textContent = "Kilométrage par année";
+    const byYear = {};
+    for (let i = 1; i < chrono.length; i++) {
+      const y = chrono[i].date.slice(0, 4);
+      const dk = chrono[i].km - chrono[i - 1].km;
+      if (dk > 0 && dk < 5000) byYear[y] = (byYear[y] || 0) + dk;
+    }
+    const years = Object.keys(byYear).sort();
+    sheetBody.innerHTML = `
+      <div class="chart-card"><h4>km par année</h4><canvas id="sheet-canvas"></canvas></div>
+      <p class="section-header">DÉTAIL</p>
+      <div class="list">
+        ${years.slice().reverse().map((y) => `
+          <div class="list-row">
+            <span class="row-label">${y}</span>
+            <span class="row-value">${fmtNum(byYear[y])} km</span>
+          </div>
+        `).join("")}
+      </div>
+      <p class="section-footer">Calculé à partir des écarts de kilométrage entre pleins consécutifs.</p>
+    `;
+    sheetChart = new Chart($("#sheet-canvas"), {
+      type: "bar",
+      data: { labels: years, datasets: [{ data: years.map((y) => byYear[y]), backgroundColor: "#ff2d55", borderRadius: 6, maxBarThickness: 32 }] },
+      options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { font: { size: 10 } } }, x: { ticks: { font: { size: 10 } } } } },
+    });
+  }
+
+  else if (kind === "month") {
+    sheetTitle.textContent = "Kilométrage par mois";
+    const byMonth = {};
+    for (let i = 1; i < chrono.length; i++) {
+      const ym = chrono[i].date.slice(0, 7);
+      const dk = chrono[i].km - chrono[i - 1].km;
+      if (dk > 0 && dk < 5000) byMonth[ym] = (byMonth[ym] || 0) + dk;
+    }
+    const months = Object.keys(byMonth).sort();
+    const last12 = months.slice(-12);
+    sheetBody.innerHTML = `
+      <div class="chart-card"><h4>12 derniers mois</h4><canvas id="sheet-canvas"></canvas></div>
+      <p class="section-header">HISTORIQUE</p>
+      <div class="list">
+        ${months.slice().reverse().map((ym) => `
+          <div class="list-row">
+            <span class="row-label">${formatYM(ym)}</span>
+            <span class="row-value">${fmtNum(byMonth[ym])} km</span>
+          </div>
+        `).join("")}
+      </div>
+    `;
+    sheetChart = new Chart($("#sheet-canvas"), {
+      type: "bar",
+      data: { labels: last12.map(formatYM), datasets: [{ data: last12.map((ym) => byMonth[ym]), backgroundColor: "#ff2d55", borderRadius: 6, maxBarThickness: 24 }] },
+      options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { font: { size: 10 } } }, x: { ticks: { font: { size: 10 } } } } },
+    });
+  }
+
+  else if (kind === "rolling12") {
+    sheetTitle.textContent = "12 mois glissants";
+    const cutoff = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const recent = chrono.filter((p, i) => i === 0 || p.date >= cutoff);
+    const byMonth = {};
+    for (let i = 1; i < chrono.length; i++) {
+      if (chrono[i].date < cutoff) continue;
+      const ym = chrono[i].date.slice(0, 7);
+      const dk = chrono[i].km - chrono[i - 1].km;
+      if (dk > 0 && dk < 5000) byMonth[ym] = (byMonth[ym] || 0) + dk;
+    }
+    const months = Object.keys(byMonth).sort();
+    const totalKm = Object.values(byMonth).reduce((a, b) => a + b, 0);
+    sheetBody.innerHTML = `
+      <p class="section-header">RÉSUMÉ</p>
+      <div class="list">
+        <div class="list-row"><span class="row-label">Total km</span><span class="row-value">${fmtNum(totalKm)} km</span></div>
+        <div class="list-row"><span class="row-label">Pleins</span><span class="row-value">${recent.length - 1}</span></div>
+        <div class="list-row"><span class="row-label">Depuis</span><span class="row-value">${fmtDate(cutoff)}</span></div>
+      </div>
+      <div class="chart-card"><h4>km par mois</h4><canvas id="sheet-canvas"></canvas></div>
+      <p class="section-header">DÉTAIL MENSUEL</p>
+      <div class="list">
+        ${months.slice().reverse().map((ym) => `
+          <div class="list-row">
+            <span class="row-label">${formatYM(ym)}</span>
+            <span class="row-value">${fmtNum(byMonth[ym])} km</span>
+          </div>
+        `).join("")}
+      </div>
+    `;
+    sheetChart = new Chart($("#sheet-canvas"), {
+      type: "bar",
+      data: { labels: months.map(formatYM), datasets: [{ data: months.map((ym) => byMonth[ym]), backgroundColor: "#ff2d55", borderRadius: 6, maxBarThickness: 24 }] },
+      options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { font: { size: 10 } } }, x: { ticks: { font: { size: 10 } } } } },
+    });
+  }
+
+  else if (kind === "conso") {
+    sheetTitle.textContent = "Consommation";
+    const points = [];
+    for (let i = 1; i < chrono.length; i++) {
+      const dKm = chrono[i].km - chrono[i - 1].km;
+      const c = consoForPlein(chrono[i], chrono[i - 1]);
+      if (c != null && dKm >= 250 && c < 15) {
+        points.push({ date: chrono[i].date, conso: c, km: chrono[i].km, station: chrono[i].station, station_custom: chrono[i].station_custom });
+      }
+    }
+    const last20 = points.slice(-20);
+    const cutoff = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const recent = chrono.filter((p) => p.date >= cutoff);
+    let avg12 = null;
+    if (recent.length >= 2) {
+      const segs = buildSegments(recent);
+      let sL = 0, sK = 0;
+      for (const s of segs) {
+        if (s.length < 2) continue;
+        sL += s.slice(1).reduce((a, p) => a + (Number(p.litres) || 0), 0);
+        sK += s[s.length - 1].km - s[0].km;
+      }
+      if (sK > 0) avg12 = (sL / sK) * 100;
+    }
+    const lastConso = points.length ? points[points.length - 1].conso : null;
+    const allAvg = points.length ? (points.reduce((a, p) => a + p.conso, 0) / points.length) : null;
+    sheetBody.innerHTML = `
+      <p class="section-header">RÉSUMÉ</p>
+      <div class="list">
+        <div class="list-row"><span class="row-label">Dernière conso</span><span class="row-value">${lastConso != null ? fmtNum(lastConso, 2) + " L/100" : "—"}</span></div>
+        <div class="list-row"><span class="row-label">Moyenne 12 mois</span><span class="row-value">${avg12 != null ? fmtNum(avg12, 2) + " L/100" : "—"}</span></div>
+        <div class="list-row"><span class="row-label">Moyenne globale</span><span class="row-value">${allAvg != null ? fmtNum(allAvg, 2) + " L/100" : "—"}</span></div>
+      </div>
+      <div class="chart-card"><h4>Conso L/100 km par plein</h4><canvas id="sheet-canvas"></canvas></div>
+      <p class="section-header">PAR PLEIN</p>
+      <div class="list">
+        ${points.slice().reverse().map((p) => `
+          <div class="list-row">
+            <span class="row-label">${fmtDate(p.date)}<br><span style="font-size:13px;color:var(--ios-text-2)">${escapeHtml(stationLabel(p.station, p.station_custom))}</span></span>
+            <span class="row-value">${fmtNum(p.conso, 2)} L/100</span>
+          </div>
+        `).join("")}
+      </div>
+      <p class="section-footer">Les pleins marqués "raté" sont exclus du calcul.</p>
+    `;
+    sheetChart = new Chart($("#sheet-canvas"), {
+      type: "line",
+      data: {
+        labels: last20.map((p) => fmtDate(p.date)),
+        datasets: [{ data: last20.map((p) => p.conso), borderColor: "#ff2d55", backgroundColor: "#ff2d5522", tension: 0.35, pointRadius: 0, borderWidth: 2.5, fill: true }],
+      },
+      options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { ticks: { font: { size: 10 } } }, x: { ticks: { font: { size: 10 }, maxTicksLimit: 6, maxRotation: 0 } } } },
+    });
+  }
+
+  detailSheet.classList.remove("hidden");
+  // force reflow puis ouverture animée
+  void detailSheet.offsetHeight;
+  detailSheet.classList.add("open");
+  document.body.style.overflow = "hidden";
+}
 $("#hidden-tiles-list").addEventListener("click", (e) => {
   const row = e.target.closest("[data-restore]");
   if (row) showTile(row.dataset.restore);
