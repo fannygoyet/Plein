@@ -1417,7 +1417,29 @@ init().then(() => {
 });
 
 if ("serviceWorker" in navigator) {
+  // Si une SW contrôlait déjà la page au démarrage, c'est qu'on n'est PAS
+  // au tout premier lancement. Dans ce cas, recharger quand une nouvelle
+  // version est annoncée par la SW.
+  const wasControlled = !!navigator.serviceWorker.controller;
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    if (e.data && e.data.type === "SW_UPDATED" && wasControlled && !reloaded) {
+      reloaded = true;
+      window.location.reload();
+    }
+  });
+  // Quand la SW active change (nouvelle prise de contrôle), on reload aussi
+  // au cas où le message n'arrive pas (Safari iOS l'écarte parfois).
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (wasControlled && !reloaded) {
+      reloaded = true;
+      window.location.reload();
+    }
+  });
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("sw.js").catch((e) => console.warn("SW registration failed", e));
+    navigator.serviceWorker.register("sw.js").then((reg) => {
+      // Force la vérification d'une nouvelle version à chaque ouverture
+      reg.update().catch(() => null);
+    }).catch((e) => console.warn("SW registration failed", e));
   });
 }
