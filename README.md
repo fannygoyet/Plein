@@ -13,14 +13,19 @@ visualiser des graphiques. Pensée pour s'épingler à l'écran d'accueil iPhone
 ├── index.html          # UI iOS native (Settings.app/Health style)
 ├── style.css           # design system iOS (light)
 ├── app.js              # logique : pleins, véhicules, stats, charts
-├── data.json           # 70 pleins parsés (seed initial)
+├── data.json           # 70 pleins parsés (LOCAL ONLY, gitignoré)
 ├── manifest.json       # manifeste PWA
 ├── sw.js               # service worker (offline)
 └── icons/              # icônes iPhone
 ```
 
 L'export Messenger brut (`donnees/`) n'est pas inclus dans le repo (il contient
-des messages persos). Pour le re-parser, place ton `message_1.html` dans
+des messages persos). Idem pour `data.json` : il est gitignoré pour que le
+visiteur de l'app publique démarre avec un historique vide. Tes propres
+données restent dans le `localStorage` de ton navigateur, sur ton téléphone
+uniquement, et tu peux les exporter à tout moment depuis l'onglet Données.
+
+Pour re-générer `data.json` localement : place ton `message_1.html` dans
 `donnees/` puis `python3 parse_data.py`.
 
 ## Fonctionnalités

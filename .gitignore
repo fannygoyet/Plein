@@ -19,3 +19,7 @@ donnees/
 Thumbs.db
 *.log
 node_modules/
+
+# Données perso (seed parsé depuis l'export Messenger).
+# Reste local, ne pas pousser sur le repo public.
+data.json

@@ -140,20 +140,27 @@ function vehicleById(id) { return vehicles.find((v) => v.id === id) || null; }
 function vehicleName(id) { const v = vehicleById(id); return v ? v.name : "—"; }
 
 async function seedFromMessenger() {
-  const r = await fetch("data.json");
-  const data = await r.json();
-  return data.map((p) => ({
-    id: uid(),
-    date: p.date,
-    station: p.station,
-    station_custom: null,
-    km: p.km,
-    litres: p.litres,
-    prix_litre: p.prix_litre,
-    total: p.total,
-    missed_before: false,
-    vehicle_id: DEFAULT_VEHICLE.id,
-  }));
+  // Tente de charger un seed local (data.json). Absent du repo public,
+  // chaque visiteur démarre avec une app vide.
+  try {
+    const r = await fetch("data.json", { cache: "no-store" });
+    if (!r.ok) return [];
+    const data = await r.json();
+    return data.map((p) => ({
+      id: uid(),
+      date: p.date,
+      station: p.station,
+      station_custom: null,
+      km: p.km,
+      litres: p.litres,
+      prix_litre: p.prix_litre,
+      total: p.total,
+      missed_before: false,
+      vehicle_id: DEFAULT_VEHICLE.id,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 async function init() {
@@ -186,6 +193,7 @@ async function init() {
   if (migrated > 0) save();
 
   refresh();
+  fillPredictions();
 }
 
 function activePleins() {
@@ -313,6 +321,39 @@ function kmSincePeriod(chrono, periodStartIso) {
 
 function sumBy(arr, key) {
   return arr.reduce((s, x) => s + (Number(x[key]) || 0), 0);
+}
+
+function predictNextPlein() {
+  // Estime km à aujourd'hui + litres pour un plein "type" sur le véhicule actif.
+  // - km/jour : moyenne sur les 6 derniers mois (ou tout l'historique si < 2 pleins récents)
+  // - litres : conso moyenne (segments) appliquée à (predictedKm - lastKm)
+  const ap = activePleins();
+  if (ap.length < 2) return null;
+
+  const sortedDesc = [...ap].sort((a, b) => (a.date < b.date ? 1 : -1));
+  const last = sortedDesc[0];
+
+  const cutoff = new Date(Date.now() - 180 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const recent = ap.filter((p) => p.date >= cutoff);
+  const usable = recent.length >= 2 ? recent : ap;
+  const usSorted = [...usable].sort((a, b) => (a.date < b.date ? -1 : 1));
+  const u0 = usSorted[0], uN = usSorted[usSorted.length - 1];
+  const days = (new Date(uN.date) - new Date(u0.date)) / (24 * 3600 * 1000);
+  if (days <= 0 || uN.km <= u0.km) return null;
+  const kmPerDay = (uN.km - u0.km) / days;
+
+  const today = new Date();
+  const daysSinceLast = Math.max(1, Math.round((today - new Date(last.date)) / (24 * 3600 * 1000)));
+  const predictedKm = Math.round(last.km + kmPerDay * daysSinceLast);
+
+  // Litres prévus à partir de la conso moyenne du véhicule
+  const stats = computeStats();
+  const dKm = predictedKm - last.km;
+  const predictedLitres = (stats && stats.consoMoyenne && dKm > 0)
+    ? +((dKm * stats.consoMoyenne) / 100).toFixed(2)
+    : null;
+
+  return { km: predictedKm, litres: predictedLitres, kmPerDay: Math.round(kmPerDay), daysSinceLast };
 }
 
 function computeStats(scope) {
@@ -605,6 +646,7 @@ function showTab(name) {
   $$(".seg").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === "tab-" + name));
   if (name === "charts") setTimeout(renderCharts, 50);
+  if (name === "add") fillPredictions();
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 $$(".seg").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
@@ -653,6 +695,28 @@ function autoCompute() {
 }
 [litresInput, prixInput, totalInput].forEach((el) => el.addEventListener("blur", autoCompute));
 
+// Quand l'utilisateur ajuste le km, on recalcule l'estimation des litres
+// (uniquement en saisie d'un nouveau plein, et seulement si litres est vide
+// ou contient une estimation auto, c.-à-d. avant qu'elle ait tapé son chiffre réel).
+let litresIsEstimate = true;
+litresInput.addEventListener("input", () => { litresIsEstimate = false; });
+
+const kmInput = form.querySelector('[name="km"]');
+kmInput.addEventListener("input", () => {
+  if (form.querySelector('[name="id"]').value) return; // édition : pas d'estim
+  if (!litresIsEstimate) return;
+  const ap = activePleins();
+  if (ap.length === 0) return;
+  const stats = computeStats();
+  if (!stats || !stats.consoMoyenne) return;
+  const sortedDesc = [...ap].sort((a, b) => (a.date < b.date ? 1 : -1));
+  const lastKm = sortedDesc[0].km;
+  const km = parseInt(kmInput.value);
+  if (isNaN(km) || km <= lastKm) return;
+  const litres = +(((km - lastKm) * stats.consoMoyenne) / 100).toFixed(2);
+  litresInput.value = litres;
+});
+
 function resetForm() {
   form.reset();
   form.querySelector('[name="id"]').value = "";
@@ -661,6 +725,22 @@ function resetForm() {
   $("#form-section-title").textContent = "DÉTAILS";
   $("#btn-cancel").classList.add("hidden");
   autoHint.textContent = "Saisis 2 champs sur 3 — le 3ᵉ se calcule tout seul.";
+  fillPredictions();
+}
+
+function fillPredictions() {
+  // Pré-remplit km et litres avec une estimation, uniquement en mode "nouveau plein"
+  // et si les champs sont vides. L'utilisateur peut écraser à tout moment.
+  if (form.querySelector('[name="id"]').value) return; // édition
+  const kmI = form.querySelector('[name="km"]');
+  const litresI = form.querySelector('[name="litres"]');
+  if (kmI.value || litresI.value) return;
+  const pred = predictNextPlein();
+  if (!pred) return;
+  if (pred.km) kmI.value = pred.km;
+  if (pred.litres) litresI.value = pred.litres;
+  litresIsEstimate = true;
+  autoHint.textContent = `Estimations : ~${fmtNum(pred.kmPerDay)} km/jour depuis ${pred.daysSinceLast} jour${pred.daysSinceLast > 1 ? "s" : ""}. Modifie avec les valeurs réelles du compteur.`;
 }
 $("#btn-cancel").addEventListener("click", () => { resetForm(); showTab("history"); });
 
