@@ -1,0 +1,21 @@
+# Données brutes Messenger (export Facebook contenant des messages perso)
+donnees/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Outils Claude / IDE
+.claude/
+.gstack/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS et logs
+Thumbs.db
+*.log
+node_modules/
