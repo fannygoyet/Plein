@@ -1,6 +1,6 @@
 /* Mes Pleins — design iOS natif (Settings.app / Health) */
 
-const VERSION = "1.5.0";
+const VERSION = "1.6.0";
 const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
 const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
@@ -12,9 +12,17 @@ const DEFAULT_VEHICLE = {
   id: "megane",
   name: "Mégane 3",
   fuel: "gazole",
+  tank_size: 60, // litres
   start_date: "2021-09-05",
   active: true,
 };
+// Taille de réservoir par défaut quand on ne sait pas (utilisée seulement comme
+// fallback de sécurité — chaque véhicule devrait avoir son propre tank_size).
+const DEFAULT_TANK_SIZE = 60;
+// Conso minimale plausible (L/100) — sert à estimer l'autonomie max théorique
+// d'un véhicule à partir de son réservoir : max_range = tank_size × 100 / minConso.
+// Une conso calculée en dessous de ce seuil = plein oublié ou sous-remplissage.
+const MIN_PLAUSIBLE_CONSO = 3.5;
 
 const FUEL_LABELS = { essence: "Essence", gazole: "Gazole", e85: "E85", electrique: "Électrique" };
 
@@ -564,6 +572,10 @@ async function init() {
   vehicles = (storedVehicles && Array.isArray(storedVehicles) && storedVehicles.length > 0)
     ? storedVehicles
     : [{ ...DEFAULT_VEHICLE }];
+  // Migration : si un véhicule n'a pas de tank_size, on lui en met un par défaut
+  for (const v of vehicles) {
+    if (!Number(v.tank_size) || Number(v.tank_size) <= 0) v.tank_size = DEFAULT_TANK_SIZE;
+  }
   activeVehicleId = (getActiveVehicle() || vehicles[0]).id;
   saveVehicles();
 
@@ -635,7 +647,8 @@ function renderVehicles() {
     const scoped = pleins.filter((p) => p.vehicle_id === v.id);
     const isActive = v.id === activeVehicleId;
     const fuelLabel = FUEL_LABELS[v.fuel] || v.fuel;
-    let metaLine = `${fuelLabel} · ${scoped.length} plein${scoped.length > 1 ? "s" : ""}`;
+    const tankLabel = `${Number(v.tank_size) || DEFAULT_TANK_SIZE} L`;
+    let metaLine = `${fuelLabel} · ${tankLabel} · ${scoped.length} plein${scoped.length > 1 ? "s" : ""}`;
     if (scoped.length > 0) {
       const sortedScoped = [...scoped].sort((a, b) => (a.date < b.date ? -1 : 1));
       const km = sortedScoped[sortedScoped.length - 1].km - sortedScoped[0].km;
@@ -667,16 +680,30 @@ function escapeHtml(s) {
 
 
 // ===== Computations =====
-// Autonomie max plausible de la voiture entre 2 pleins. Au-dessus, on considère
-// qu'un plein a été oublié et on traite la transition comme si missed_before
-// avait été coché — sans modifier les données de l'utilisateur.
-const MAX_RANGE_KM = 1200;
+// Autonomie max théorique = réservoir × 100 / conso minimale plausible.
+// Au-dessus, on considère qu'un plein a été oublié et on traite la transition
+// comme si missed_before avait été coché — sans modifier les données.
+function tankSizeFor(p) {
+  const v = p && p.vehicle_id ? vehicleById(p.vehicle_id) : getActiveVehicle();
+  return (v && Number(v.tank_size) > 0) ? Number(v.tank_size) : DEFAULT_TANK_SIZE;
+}
+function maxRangeFor(p) {
+  return Math.round((tankSizeFor(p) * 100) / MIN_PLAUSIBLE_CONSO);
+}
 
 function isMissedTransition(p, prev) {
   if (p.missed_before) return true;
   if (!prev || !p.km || !prev.km) return false;
   const dKm = p.km - prev.km;
-  return dKm > MAX_RANGE_KM;
+  if (dKm > maxRangeFor(p)) return true;
+  // Plein > taille du réservoir = impossible physiquement → un plein a sauté
+  if (p.litres && Number(p.litres) > tankSizeFor(p) * 1.05) return true;
+  // Conso implausiblement basse → soit plein oublié, soit refill partiel : on écarte
+  if (p.litres && dKm > 0) {
+    const c = (Number(p.litres) / dKm) * 100;
+    if (c < MIN_PLAUSIBLE_CONSO) return true;
+  }
+  return false;
 }
 
 function consoForPlein(p, prev) {
@@ -1704,11 +1731,14 @@ $("#btn-add-vehicle").addEventListener("click", () => {
   if (!name) return;
   const fuel = (window.prompt("Carburant ? Tape : essence, gazole, e85 ou electrique", "gazole") || "").trim().toLowerCase();
   if (!FUEL_LABELS[fuel]) { toast("Carburant non reconnu", "error"); return; }
+  const tankRaw = (window.prompt("Taille du réservoir en litres (ex: 60)", String(DEFAULT_TANK_SIZE)) || "").trim().replace(",", ".");
+  const tank = Number(tankRaw);
+  if (!Number.isFinite(tank) || tank <= 0 || tank > 200) { toast("Réservoir invalide", "error"); return; }
   const startDate = (window.prompt("Date du premier plein (AAAA-MM-JJ)", todayStr()) || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) { toast("Date invalide", "error"); return; }
   const v = {
     id: "v_" + uid(),
-    name, fuel, start_date: startDate, active: false,
+    name, fuel, tank_size: tank, start_date: startDate, active: false,
   };
   vehicles.push(v);
   // Le nouveau véhicule devient le véhicule actif (logique : on l'ajoute parce qu'on en change)
@@ -1734,15 +1764,16 @@ $("#vehicles-list").addEventListener("click", (e) => {
   const isActive = v.id === activeVehicleId;
   // Récap stats du véhicule
   const vstats = computeStats(pleins.filter((p) => p.vehicle_id === id));
-  let summary = `${v.name} · ${FUEL_LABELS[v.fuel]} · ${count} plein(s)`;
+  const tank = Number(v.tank_size) || DEFAULT_TANK_SIZE;
+  let summary = `${v.name} · ${FUEL_LABELS[v.fuel]} · ${tank} L · ${count} plein(s)`;
   if (vstats) {
     summary += `\nTotal : ${fmtNum(vstats.totalKm)} km · ${fmtNum(vstats.totalEur, 0)} € · ${fmtNum(vstats.totalLitres, 0)} L`;
     if (vstats.consoMoyenne != null) summary += `\nConso moyenne : ${fmtNum(vstats.consoMoyenne, 2)} L/100`;
     if (vstats.first && vstats.last) summary += `\nPériode : ${fmtDate(vstats.first.date)} → ${fmtDate(vstats.last.date)}`;
   }
   const opts = isActive
-    ? "  R = Renommer\n  C = Changer le carburant\n  D = Changer la date de début\n  S = Supprimer"
-    : "  A = Réactiver (les stats reprendront sur ce véhicule)\n  R = Renommer\n  C = Changer le carburant\n  D = Changer la date de début\n  S = Supprimer";
+    ? "  R = Renommer\n  C = Changer le carburant\n  T = Changer la taille du réservoir\n  D = Changer la date de début\n  S = Supprimer"
+    : "  A = Réactiver (les stats reprendront sur ce véhicule)\n  R = Renommer\n  C = Changer le carburant\n  T = Changer la taille du réservoir\n  D = Changer la date de début\n  S = Supprimer";
   const choice = window.prompt(`${summary}\n\nActions :\n${opts}\n  (laisse vide pour fermer)`, "");
   if (!choice) return;
   const c = choice.trim().toUpperCase();
@@ -1756,6 +1787,10 @@ $("#vehicles-list").addEventListener("click", (e) => {
   } else if (c === "C") {
     const f = (window.prompt("Carburant : essence, gazole, e85 ou electrique", v.fuel) || "").trim().toLowerCase();
     if (FUEL_LABELS[f]) { v.fuel = f; saveVehicles(); refresh(); toast("Carburant mis à jour", "success"); }
+  } else if (c === "T") {
+    const t = Number((window.prompt("Taille du réservoir en litres", String(v.tank_size || DEFAULT_TANK_SIZE)) || "").trim().replace(",", "."));
+    if (Number.isFinite(t) && t > 0 && t <= 200) { v.tank_size = t; saveVehicles(); refresh(); toast("Réservoir mis à jour", "success"); }
+    else toast("Valeur invalide", "error");
   } else if (c === "D") {
     const d = (window.prompt("Date de début (AAAA-MM-JJ)", v.start_date) || "").trim();
     if (/^\d{4}-\d{2}-\d{2}$/.test(d)) { v.start_date = d; saveVehicles(); refresh(); toast("Date mise à jour", "success"); }
