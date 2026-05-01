@@ -15,7 +15,7 @@ from html.parser import HTMLParser
 from pathlib import Path
 
 SRC = Path(__file__).parent / "donnees" / "message_1.html"
-OUT_JSON = Path(__file__).parent / "app" / "data.json"
+OUT_JSON = Path(__file__).parent / "data.json"
 
 MONTHS = {
     "janv": 1, "jan": 1, "févr": 2, "fév": 2, "fev": 2, "mars": 3, "mar": 3,

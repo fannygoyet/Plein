@@ -9,15 +9,14 @@ visualiser des graphiques. Pensée pour s'épingler à l'écran d'accueil iPhone
 
 ```
 .
-├── parse_data.py           # parser HTML Messenger → JSON propre
-└── app/
-    ├── index.html          # UI iOS native (Settings.app/Health style)
-    ├── style.css           # design system iOS (light)
-    ├── app.js              # logique : pleins, véhicules, stats, charts
-    ├── data.json           # 70 pleins parsés (seed initial)
-    ├── manifest.json       # manifeste PWA
-    ├── sw.js               # service worker (offline)
-    └── icons/              # icônes iPhone
+├── parse_data.py       # parser HTML Messenger → JSON propre
+├── index.html          # UI iOS native (Settings.app/Health style)
+├── style.css           # design system iOS (light)
+├── app.js              # logique : pleins, véhicules, stats, charts
+├── data.json           # 70 pleins parsés (seed initial)
+├── manifest.json       # manifeste PWA
+├── sw.js               # service worker (offline)
+└── icons/              # icônes iPhone
 ```
 
 L'export Messenger brut (`donnees/`) n'est pas inclus dans le repo (il contient
@@ -45,24 +44,27 @@ des messages persos). Pour le re-parser, place ton `message_1.html` dans
 ## Lancer en local
 
 ```bash
-cd app
 python3 -m http.server 8000
 # Ouvre http://localhost:8000 dans Safari ou Chrome
 ```
 
-## Déployer sur iPhone
+## Hébergement
 
-1. Push sur GitHub puis active **GitHub Pages** (Settings → Pages → branch
-   `main` → folder `/app`). Ou utilise [Netlify Drop](https://app.netlify.com/drop)
-   en glissant le dossier `app/`.
-2. Ouvre l'URL publique dans **Safari** sur iPhone.
-3. Touche **Partager** → **Sur l'écran d'accueil**. L'app s'installe avec son
-   icône, démarre en plein écran et marche hors-ligne.
+Activer **GitHub Pages** : Settings → Pages → Source : Deploy from a branch →
+branch `main` → folder `/` (root) → Save. Au bout d'~1 minute, l'URL est
+`https://<user>.github.io/Plein/`.
+
+Alternative : [Netlify Drop](https://app.netlify.com/drop) en glissant le
+dossier du repo dessus.
+
+Ouvrir l'URL dans **Safari** sur iPhone, puis **Partager → Sur l'écran
+d'accueil**. L'app s'installe avec son icône, démarre en plein écran et
+fonctionne hors-ligne.
 
 ## Re-parser un nouvel export
 
 ```bash
 cp ~/Downloads/messages/.../message_1.html donnees/
-python3 parse_data.py     # régénère app/data.json
+python3 parse_data.py     # régénère data.json
 # Dans l'app : onglet Données → "Réinitialiser depuis l'export Messenger"
 ```
