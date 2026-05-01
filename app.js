@@ -1,6 +1,6 @@
 /* Mes Pleins — design iOS natif (Settings.app / Health) */
 
-const VERSION = "1.4.1";
+const VERSION = "1.5.0";
 const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
 const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
@@ -796,10 +796,33 @@ function computeStats(scope) {
     if (isMissedTransition(sorted[i], i > 0 ? sorted[i - 1] : null)) missedCount++;
   }
 
+  // Conso par station (le carburant pris à la station "src" est celui consommé jusqu'au plein suivant)
+  const consoByStation = {};
+  for (let i = 1; i < sorted.length; i++) {
+    const cur = sorted[i], prev = sorted[i - 1];
+    if (isMissedTransition(cur, prev)) continue;
+    if (!cur.litres || !cur.km || !prev.km) continue;
+    const dKm = cur.km - prev.km;
+    if (dKm <= 0) continue;
+    const src = prev.station || "null";
+    const acc = consoByStation[src] || { L: 0, km: 0, n: 0 };
+    acc.L += Number(cur.litres) || 0;
+    acc.km += dKm;
+    acc.n += 1;
+    consoByStation[src] = acc;
+  }
+  const stationConso = Object.entries(consoByStation)
+    .filter(([, a]) => a.n >= 2 && a.km > 0)
+    .map(([s, a]) => ({ station: s, conso: (a.L / a.km) * 100, n: a.n }))
+    .sort((a, b) => a.conso - b.conso);
+  const bestStation = stationConso[0] || null;
+  const worstStation = stationConso[stationConso.length - 1] || null;
+
   return {
     nb: sorted.length, totalEur, totalLitres, totalKm,
     consoMoyenne, prixMoyen, eurParAn, kmParAn, eurParKm,
     kmYTD, km12Months, rolling12Start, missedCount, first, last,
+    bestStation, worstStation, stationConso,
   };
 }
 
@@ -876,7 +899,9 @@ function renderStats() {
     { label: "Prix moyen /L",   icon: "€", color: "pink",   value: fmtNum(s.prixMoyen, 3), unit: "€/L" },
     { label: "€ par an",        icon: "Σ", color: "blue",   value: fmtNum(s.eurParAn, 0), unit: "€" },
     { label: "km par an",       icon: "Σ", color: "green",  value: fmtNum(s.kmParAn, 0), unit: "km" },
-    { label: "€ par km",        icon: "÷", color: "gray",   value: s.eurParKm != null ? fmtNum(s.eurParKm * 100, 2) : "—", unit: "¢/km", span2: true },
+    { label: "€ par km",        icon: "÷", color: "gray",   value: s.eurParKm != null ? fmtNum(s.eurParKm * 100, 2) : "—", unit: "¢/km" },
+    { label: "Station + économe", icon: "★", color: "green",  value: s.bestStation ? (STATION_LABELS[s.bestStation.station] || s.bestStation.station) : "—", sub: s.bestStation ? `${fmtNum(s.bestStation.conso, 2)} L/100 · ${s.bestStation.n} pleins` : "pas assez de données" },
+    { label: "Station + gourmande", icon: "▼", color: "red",  value: s.worstStation ? (STATION_LABELS[s.worstStation.station] || s.worstStation.station) : "—", sub: s.worstStation ? `${fmtNum(s.worstStation.conso, 2)} L/100 · ${s.worstStation.n} pleins` : "—" },
   ];
   grid.innerHTML = cards.map((c) => `
     <div class="stat-card${c.span2 ? " span-2" : ""}">
@@ -1030,6 +1055,28 @@ function renderCharts() {
   });
   makeBar("chart-stations-prix", stLabels, stPrix, "€/L", t.orange, stColors);
   makeBar("chart-stations-count", stLabels, stOrder.map((s) => byStation[s].length), "Pleins", t.blue, stColors);
+
+  // Stations · conso moyenne (fuel pris à cette station = fuel consommé jusqu'au plein suivant)
+  const consoByStation = {};
+  for (let i = 1; i < chrono.length; i++) {
+    const cur = chrono[i], prev = chrono[i - 1];
+    if (isMissedTransition(cur, prev)) continue;
+    if (!cur.litres || !cur.km || !prev.km) continue;
+    const dKm = cur.km - prev.km;
+    if (dKm <= 0) continue;
+    const src = prev.station || "null";
+    const acc = consoByStation[src] || { L: 0, km: 0, n: 0 };
+    acc.L += Number(cur.litres) || 0;
+    acc.km += dKm;
+    acc.n += 1;
+    consoByStation[src] = acc;
+  }
+  // Réutilise stOrder pour garder l'ordre cohérent et la même palette de couleurs
+  const stConso = stOrder.map((s) => {
+    const a = consoByStation[s];
+    return a && a.km > 0 ? +((a.L / a.km) * 100).toFixed(2) : 0;
+  });
+  makeBar("chart-stations-conso", stLabels, stConso, "L/100", t.green, stColors);
 }
 
 function groupBy(arr, fn) {
