@@ -1,6 +1,6 @@
 /* Mes Pleins — design iOS natif (Settings.app / Health) */
 
-const VERSION = "1.4.0";
+const VERSION = "1.4.1";
 const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
 const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
@@ -667,9 +667,21 @@ function escapeHtml(s) {
 
 
 // ===== Computations =====
+// Autonomie max plausible de la voiture entre 2 pleins. Au-dessus, on considère
+// qu'un plein a été oublié et on traite la transition comme si missed_before
+// avait été coché — sans modifier les données de l'utilisateur.
+const MAX_RANGE_KM = 1200;
+
+function isMissedTransition(p, prev) {
+  if (p.missed_before) return true;
+  if (!prev || !p.km || !prev.km) return false;
+  const dKm = p.km - prev.km;
+  return dKm > MAX_RANGE_KM;
+}
+
 function consoForPlein(p, prev) {
   if (!prev || !p.km || !prev.km || !p.litres) return null;
-  if (p.missed_before) return null;
+  if (isMissedTransition(p, prev)) return null;
   const dKm = p.km - prev.km;
   if (dKm <= 0) return null;
   return (p.litres / dKm) * 100;
@@ -678,8 +690,10 @@ function consoForPlein(p, prev) {
 function buildSegments(chrono) {
   const segs = [];
   let cur = [];
-  for (const p of chrono) {
-    if (p.missed_before && cur.length > 0) {
+  for (let i = 0; i < chrono.length; i++) {
+    const p = chrono[i];
+    const prev = i > 0 ? chrono[i - 1] : null;
+    if (isMissedTransition(p, prev) && cur.length > 0) {
       segs.push(cur);
       cur = [p];
     } else {
@@ -776,7 +790,11 @@ function computeStats(scope) {
   const rolling12Start = `${yMinus1}-${String(m1).padStart(2, "0")}-01`;
   const km12Months = kmSincePeriod(sorted, rolling12Start);
 
-  const missedCount = sorted.filter((p) => p.missed_before).length;
+  // Compte les pleins ratés (cochés manuellement OU détectés auto par MAX_RANGE_KM)
+  let missedCount = 0;
+  for (let i = 0; i < sorted.length; i++) {
+    if (isMissedTransition(sorted[i], i > 0 ? sorted[i - 1] : null)) missedCount++;
+  }
 
   return {
     nb: sorted.length, totalEur, totalLitres, totalKm,
