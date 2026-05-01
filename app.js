@@ -1,8 +1,10 @@
 /* Mes Pleins — design iOS natif (Settings.app / Health) */
 
-const VERSION = "1.2.0";
+const VERSION = "1.3.0";
 const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
+const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
+const PROFILE_KEY = "plein_profile_v1";       // prénom de l'utilisateur
 
 // Véhicule par défaut : la Mégane (toutes les données du seed lui sont rattachées)
 const DEFAULT_VEHICLE = {
@@ -67,6 +69,9 @@ const STATION_COLORS = {
 let pleins = [];
 let vehicles = [];        // [{id, name, fuel, start_date, active}]
 let activeVehicleId = null;
+let profile = { name: "Fanny" };
+let dashboardLayout = null;  // {order: [tileIds], hidden: [tileIds]}
+let editMode = false;
 
 // ===== Utils =====
 const $ = (sel, ctx = document) => ctx.querySelector(sel);
@@ -126,6 +131,20 @@ function load() {
 }
 function save() { localStorage.setItem(STORAGE_KEY, JSON.stringify(pleins)); }
 
+function loadProfile() {
+  const raw = localStorage.getItem(PROFILE_KEY);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+function saveProfile() { localStorage.setItem(PROFILE_KEY, JSON.stringify(profile)); }
+
+function loadDashboard() {
+  const raw = localStorage.getItem(DASHBOARD_KEY);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+function saveDashboard() { localStorage.setItem(DASHBOARD_KEY, JSON.stringify(dashboardLayout)); }
+
 function loadVehicles() {
   const raw = localStorage.getItem(VEHICLES_KEY);
   if (!raw) return null;
@@ -163,7 +182,355 @@ async function seedFromMessenger() {
   }
 }
 
+// ===== Widgets / tuiles dashboard =====
+// Ordre par défaut, taille, libellé court (visible dans le menu d'ajout).
+const TILES = [
+  { id: "hero",       size: "hero",  label: "En-tête véhicule" },
+  { id: "year",       size: "small", label: "km cette année" },
+  { id: "month",      size: "small", label: "km ce mois" },
+  { id: "rolling12",  size: "small", label: "12 derniers mois" },
+  { id: "conso",      size: "small", label: "Conso moyenne" },
+  { id: "lastFill",   size: "wide",  label: "Dernier plein" },
+  { id: "nextFill",   size: "wide",  label: "Prochain plein estimé" },
+  { id: "totalSpent", size: "small", label: "Total dépensé" },
+  { id: "lastPrice",  size: "small", label: "Prix actuel /L" },
+  { id: "topStation", size: "small", label: "Station favorite" },
+  { id: "streak",     size: "small", label: "Jours depuis dernier plein" },
+  { id: "totalKm",    size: "small", label: "km total parcourus" },
+  { id: "recordPrice",size: "small", label: "Prix max enregistré" },
+  { id: "recordCheap",size: "small", label: "Prix le moins cher" },
+];
+
+function renderDashboard() {
+  const dash = $("#dashboard");
+  if (!dash) return;
+  const order = dashboardLayout.order || TILES.map((t) => t.id);
+  const hidden = new Set(dashboardLayout.hidden || []);
+  const visible = order.filter((id) => !hidden.has(id) && TILES.find((t) => t.id === id));
+
+  dash.innerHTML = visible.map((id) => {
+    const tile = TILES.find((t) => t.id === id);
+    if (!tile) return "";
+    const html = renderTile(id);
+    if (!html) return "";
+    return `<div class="tile ${tile.size === "wide" ? "wide" : ""} ${tile.size === "hero" ? "hero" : ""}" data-tile="${id}" draggable="true">
+      <span class="tile-remove" data-remove="${id}">−</span>
+      ${html}
+    </div>`;
+  }).join("");
+
+  dash.classList.toggle("edit-mode", editMode);
+  // Liste des modules masqués
+  const hiddenList = $("#hidden-tiles-list");
+  if (hiddenList) {
+    const hiddenTiles = order.filter((id) => hidden.has(id));
+    if (hiddenTiles.length === 0) {
+      hiddenList.innerHTML = `<div class="list-row" style="cursor:default; color:var(--ios-text-2)">Aucun module masqué</div>`;
+    } else {
+      hiddenList.innerHTML = hiddenTiles.map((id) => {
+        const t = TILES.find((x) => x.id === id);
+        return `<div class="list-row" data-restore="${id}">
+          <div class="row-icon bg-blue">＋</div>
+          <span class="row-label">${escapeHtml(t ? t.label : id)}</span>
+        </div>`;
+      }).join("");
+    }
+  }
+  $("#edit-actions").classList.toggle("hidden", !editMode);
+  $("#nav-edit-btn").textContent = editMode ? "OK" : "Modifier";
+  $("#nav-edit-btn").style.fontWeight = editMode ? "600" : "400";
+
+  enableDragAndDrop();
+}
+
+function renderTile(id) {
+  const ap = activePleins();
+  const v = getActiveVehicle();
+  const stats = computeStats();
+  const today = new Date();
+
+  switch (id) {
+    case "hero": {
+      if (!v) return "";
+      const km = stats ? fmtNum(stats.totalKm) : "—";
+      const conso = stats && stats.consoMoyenne ? fmtNum(stats.consoMoyenne, 2) + " L/100" : "—";
+      return `
+        <div class="hero-row">
+          <div class="hero-emoji">🚗</div>
+          <div class="hero-text">
+            <h2 class="hero-name">${escapeHtml(v.name)}</h2>
+            <p class="hero-meta">${ap.length} pleins · ${km} km · ${conso}</p>
+          </div>
+        </div>`;
+    }
+    case "year": {
+      if (!stats) return null;
+      return `
+        <div class="tile-label"><span class="tile-icon bg-indigo">▲</span>${today.getFullYear()}</div>
+        <div class="tile-value">${fmtNum(stats.kmYTD || 0)}<span class="unit">km</span></div>
+        <div class="tile-sub">depuis le 1ᵉʳ janvier</div>`;
+    }
+    case "month": {
+      if (!stats) return null;
+      const mStart = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-01`;
+      const km = kmSincePeriod([...ap].sort((a, b) => (a.date < b.date ? -1 : 1)), mStart);
+      const monthName = today.toLocaleDateString("fr-FR", { month: "long" });
+      return `
+        <div class="tile-label"><span class="tile-icon bg-teal">↻</span>Ce mois</div>
+        <div class="tile-value">${fmtNum(km || 0)}<span class="unit">km</span></div>
+        <div class="tile-sub">en ${monthName}</div>`;
+    }
+    case "rolling12": {
+      if (!stats || stats.km12Months == null) return null;
+      return `
+        <div class="tile-label"><span class="tile-icon bg-purple">↻</span>12 mois</div>
+        <div class="tile-value">${fmtNum(stats.km12Months)}<span class="unit">km</span></div>
+        <div class="tile-sub">glissants</div>`;
+    }
+    case "conso": {
+      if (!stats || stats.consoMoyenne == null) return null;
+      return `
+        <div class="tile-label"><span class="tile-icon bg-red">▾</span>Conso</div>
+        <div class="tile-value">${fmtNum(stats.consoMoyenne, 2)}<span class="unit">L/100</span></div>
+        <div class="tile-sub">moyenne globale</div>`;
+    }
+    case "lastFill": {
+      if (ap.length === 0) return null;
+      const sorted = [...ap].sort((a, b) => (a.date < b.date ? 1 : -1));
+      const last = sorted[0];
+      return `
+        <div class="tile-label"><span class="tile-icon bg-blue">⏱</span>Dernier plein</div>
+        <div class="tile-value">${fmtDate(last.date)}</div>
+        <div class="tile-sub">${stationLabel(last.station, last.station_custom)} · ${fmtNum(last.km)} km · ${fmtNum(last.litres, 2)} L · ${fmtNum(last.total, 2)} €</div>`;
+    }
+    case "nextFill": {
+      const pred = predictNextPlein();
+      if (!pred) return null;
+      const litresStr = pred.litres ? ` · ~${fmtNum(pred.litres, 1)} L` : "";
+      return `
+        <div class="tile-label"><span class="tile-icon bg-orange">◇</span>Prochain plein estimé</div>
+        <div class="tile-value">~${fmtNum(pred.km)}<span class="unit">km</span></div>
+        <div class="tile-sub">${pred.kmPerDay} km/jour · ${pred.daysSinceLast}j depuis le dernier${litresStr}</div>`;
+    }
+    case "totalSpent": {
+      if (!stats) return null;
+      return `
+        <div class="tile-label"><span class="tile-icon bg-green">€</span>Total</div>
+        <div class="tile-value">${fmtNum(stats.totalEur, 0)}<span class="unit">€</span></div>
+        <div class="tile-sub">dépensé en carburant</div>`;
+    }
+    case "lastPrice": {
+      if (ap.length === 0) return null;
+      const sorted = [...ap].sort((a, b) => (a.date < b.date ? 1 : -1));
+      const last = sorted[0];
+      const avg = stats && stats.prixMoyen ? stats.prixMoyen : null;
+      let trend = "";
+      if (avg && last.prix_litre) {
+        const diff = ((last.prix_litre - avg) / avg) * 100;
+        const cls = diff > 0 ? "up" : "down";
+        const sign = diff > 0 ? "▲" : "▼";
+        trend = `<div class="tile-trend ${cls}">${sign} ${Math.abs(diff).toFixed(1)}% vs moyenne</div>`;
+      }
+      return `
+        <div class="tile-label"><span class="tile-icon bg-pink">€</span>Dernier prix</div>
+        <div class="tile-value">${last.prix_litre ? fmtNum(last.prix_litre, 3) : "—"}<span class="unit">€/L</span></div>
+        ${trend}`;
+    }
+    case "topStation": {
+      if (ap.length === 0) return null;
+      const counts = {};
+      for (const p of ap) {
+        const k = p.station || "autre";
+        counts[k] = (counts[k] || 0) + 1;
+      }
+      const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+      if (!top) return null;
+      const [key, count] = top;
+      return `
+        <div class="tile-label"><span class="tile-icon bg-yellow">★</span>Favorite</div>
+        <div class="tile-value" style="font-size:24px">${escapeHtml(STATION_LABELS[key] || key)}</div>
+        <div class="tile-sub">${count} pleins (${Math.round((count / ap.length) * 100)}%)</div>`;
+    }
+    case "streak": {
+      if (ap.length === 0) return null;
+      const sorted = [...ap].sort((a, b) => (a.date < b.date ? 1 : -1));
+      const last = sorted[0];
+      const days = Math.floor((Date.now() - new Date(last.date).getTime()) / (24 * 3600 * 1000));
+      return `
+        <div class="tile-label"><span class="tile-icon bg-gray">⏱</span>Jours sans plein</div>
+        <div class="tile-value">${days}<span class="unit">j</span></div>
+        <div class="tile-sub">depuis le ${fmtDate(last.date)}</div>`;
+    }
+    case "totalKm": {
+      if (!stats) return null;
+      return `
+        <div class="tile-label"><span class="tile-icon bg-purple">↗</span>Distance</div>
+        <div class="tile-value">${fmtNum(stats.totalKm)}<span class="unit">km</span></div>
+        <div class="tile-sub">parcourus en tout</div>`;
+    }
+    case "recordPrice": {
+      if (ap.length === 0) return null;
+      const max = ap.filter((p) => p.prix_litre).reduce((m, p) => p.prix_litre > (m ? m.prix_litre : 0) ? p : m, null);
+      if (!max) return null;
+      return `
+        <div class="tile-label"><span class="tile-icon bg-red">▲</span>Plus cher</div>
+        <div class="tile-value">${fmtNum(max.prix_litre, 3)}<span class="unit">€/L</span></div>
+        <div class="tile-sub">${fmtDate(max.date)} · ${stationLabel(max.station, max.station_custom)}</div>`;
+    }
+    case "recordCheap": {
+      if (ap.length === 0) return null;
+      const min = ap.filter((p) => p.prix_litre).reduce((m, p) => p.prix_litre < (m ? m.prix_litre : Infinity) ? p : m, null);
+      if (!min) return null;
+      return `
+        <div class="tile-label"><span class="tile-icon bg-green">▼</span>Moins cher</div>
+        <div class="tile-value">${fmtNum(min.prix_litre, 3)}<span class="unit">€/L</span></div>
+        <div class="tile-sub">${fmtDate(min.date)} · ${stationLabel(min.station, min.station_custom)}</div>`;
+    }
+    default:
+      return null;
+  }
+}
+
+// ===== Drag & drop des tuiles (mode édition) =====
+function enableDragAndDrop() {
+  const dash = $("#dashboard");
+  if (!dash || !editMode) return;
+  const tiles = $$(".tile", dash);
+  tiles.forEach((tile) => {
+    tile.addEventListener("dragstart", onDragStart);
+    tile.addEventListener("dragover", onDragOver);
+    tile.addEventListener("drop", onDrop);
+    tile.addEventListener("dragend", onDragEnd);
+    // Touch support
+    tile.addEventListener("touchstart", onTouchStart, { passive: false });
+  });
+}
+
+let draggedTileId = null;
+function onDragStart(e) {
+  if (!editMode) return;
+  draggedTileId = e.currentTarget.dataset.tile;
+  e.currentTarget.classList.add("dragging");
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("text/plain", draggedTileId);
+}
+function onDragOver(e) {
+  if (!editMode || !draggedTileId) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = "move";
+  const target = e.currentTarget;
+  if (target.dataset.tile !== draggedTileId) {
+    reorderTiles(draggedTileId, target.dataset.tile);
+  }
+}
+function onDrop(e) { e.preventDefault(); }
+function onDragEnd(e) {
+  e.currentTarget.classList.remove("dragging");
+  draggedTileId = null;
+  saveDashboard();
+}
+
+// Touch drag : on prend le doigt, on déplace, on swap au survol
+let touchTile = null;
+let touchOffset = { x: 0, y: 0 };
+let touchClone = null;
+
+function onTouchStart(e) {
+  if (!editMode) return;
+  if (e.target.closest(".tile-remove")) return; // laisse le clic sur −
+  e.preventDefault();
+  touchTile = e.currentTarget;
+  const rect = touchTile.getBoundingClientRect();
+  const t = e.touches[0];
+  touchOffset.x = t.clientX - rect.left;
+  touchOffset.y = t.clientY - rect.top;
+  touchTile.classList.add("dragging");
+  document.addEventListener("touchmove", onTouchMove, { passive: false });
+  document.addEventListener("touchend", onTouchEnd);
+}
+function onTouchMove(e) {
+  if (!touchTile) return;
+  e.preventDefault();
+  const t = e.touches[0];
+  touchTile.style.position = "relative";
+  touchTile.style.zIndex = "10";
+  // On regarde sur quelle tuile on est
+  touchTile.style.pointerEvents = "none";
+  const elBelow = document.elementFromPoint(t.clientX, t.clientY);
+  touchTile.style.pointerEvents = "";
+  const otherTile = elBelow && elBelow.closest(".tile");
+  if (otherTile && otherTile !== touchTile) {
+    const draggedId = touchTile.dataset.tile;
+    const targetId = otherTile.dataset.tile;
+    reorderTiles(draggedId, targetId);
+  }
+}
+function onTouchEnd() {
+  if (touchTile) {
+    touchTile.classList.remove("dragging");
+    touchTile.style.position = "";
+    touchTile.style.zIndex = "";
+  }
+  touchTile = null;
+  document.removeEventListener("touchmove", onTouchMove);
+  document.removeEventListener("touchend", onTouchEnd);
+  saveDashboard();
+}
+
+function reorderTiles(draggedId, targetId) {
+  const order = [...dashboardLayout.order];
+  const i = order.indexOf(draggedId);
+  const j = order.indexOf(targetId);
+  if (i < 0 || j < 0) return;
+  order.splice(i, 1);
+  order.splice(j, 0, draggedId);
+  dashboardLayout.order = order;
+  renderDashboard();
+}
+
+function hideTile(id) {
+  if (!dashboardLayout.hidden.includes(id)) dashboardLayout.hidden.push(id);
+  saveDashboard();
+  renderDashboard();
+}
+function showTile(id) {
+  dashboardLayout.hidden = dashboardLayout.hidden.filter((x) => x !== id);
+  saveDashboard();
+  renderDashboard();
+}
+
+function toggleEditMode(force) {
+  editMode = force === undefined ? !editMode : force;
+  renderDashboard();
+}
+
+// ===== Greeting =====
+function updateGreeting() {
+  const el = $("#greeting-text");
+  const elDate = $("#greeting-date");
+  if (!el) return;
+  const h = new Date().getHours();
+  let salut = "Bonjour";
+  let emoji = "☀️";
+  if (h < 5) { salut = "Bonsoir"; emoji = "🌙"; }
+  else if (h < 12) { salut = "Bonjour"; emoji = "☀️"; }
+  else if (h < 18) { salut = "Bonjour"; emoji = "🌤"; }
+  else { salut = "Bonsoir"; emoji = "🌆"; }
+  el.innerHTML = `${salut}, ${escapeHtml(profile.name || "Fanny")} ${emoji}`;
+  if (elDate) {
+    elDate.textContent = new Date().toLocaleDateString("fr-FR", { weekday: "long", day: "numeric", month: "long" });
+  }
+}
+
 async function init() {
+  // Profil
+  profile = loadProfile() || { name: "Fanny" };
+  saveProfile();
+
+  // Dashboard layout
+  dashboardLayout = loadDashboard() || { order: TILES.map((t) => t.id), hidden: [] };
+  saveDashboard();
+
   // Véhicules
   const storedVehicles = loadVehicles();
   vehicles = (storedVehicles && Array.isArray(storedVehicles) && storedVehicles.length > 0)
@@ -208,7 +575,8 @@ function refresh() {
   renderHistory();
   renderStats();
   renderCharts();
-  updateLargeTitleSub();
+  renderDashboard();
+  updateGreeting();
   $("#data-count").textContent = `${activePleins().length}`;
 }
 
@@ -269,18 +637,6 @@ function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 }
 
-function updateLargeTitleSub() {
-  const el = $("#large-title-sub");
-  const ap = activePleins();
-  const v = getActiveVehicle();
-  if (ap.length === 0) {
-    el.textContent = v ? `${v.name} · aucun plein` : "Aucun plein";
-    return;
-  }
-  const sorted = [...ap].sort((a, b) => (a.date < b.date ? -1 : 1));
-  const first = sorted[0], last = sorted[sorted.length - 1];
-  el.textContent = `${v ? v.name + " · " : ""}${ap.length} pleins · ${fmtDate(first.date)} → ${fmtDate(last.date)}`;
-}
 
 // ===== Computations =====
 function consoForPlein(p, prev) {
@@ -641,24 +997,65 @@ function formatYM(ym) {
   return `${months[+m - 1]} ${y.slice(2)}`;
 }
 
-// ===== Tabs (segmented control) =====
+// ===== Tabs (bottom tab bar iOS) =====
 function showTab(name) {
-  $$(".seg").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
+  // Désactive le mode édition quand on quitte Aujourd'hui
+  if (name !== "today" && editMode) toggleEditMode(false);
+  $$(".tab-bar-btn").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   $$(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === "tab-" + name));
   if (name === "charts") setTimeout(renderCharts, 50);
   if (name === "add") fillPredictions();
+  // Affiche/masque le bouton "Modifier" : visible uniquement sur Aujourd'hui
+  $("#nav-edit-btn").style.visibility = name === "today" ? "visible" : "hidden";
+  // Le bouton ＋ en haut à droite : visible partout sauf sur l'onglet Ajouter lui-même
+  $("#nav-add-btn").style.visibility = name === "add" ? "hidden" : "visible";
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
-$$(".seg").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
+$$(".tab-bar-btn").forEach((b) => b.addEventListener("click", () => showTab(b.dataset.tab)));
 
 // ===== Nav bar scroll behavior =====
 const navBar = $("#nav-bar");
-const largeTitle = $("#large-title");
 function onScroll() {
-  const r = largeTitle.getBoundingClientRect();
-  navBar.classList.toggle("scrolled", r.bottom < 44 + (parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--safe-top")) || 0));
+  navBar.classList.toggle("scrolled", window.scrollY > 8);
 }
 window.addEventListener("scroll", onScroll, { passive: true });
+
+// ===== Nav actions =====
+$("#nav-edit-btn").addEventListener("click", () => toggleEditMode());
+$("#nav-add-btn").addEventListener("click", () => showTab("add"));
+
+// ===== Dashboard interactions =====
+$("#dashboard").addEventListener("click", (e) => {
+  const remove = e.target.closest("[data-remove]");
+  if (remove) {
+    e.stopPropagation();
+    hideTile(remove.dataset.remove);
+    return;
+  }
+  // Hors mode édition : un tap sur la tuile "Dernier plein" ou "Prochain plein"
+  // ouvre l'onglet ajout pour confort
+  if (!editMode) {
+    const tile = e.target.closest("[data-tile]");
+    if (!tile) return;
+    if (tile.dataset.tile === "nextFill" || tile.dataset.tile === "lastFill") {
+      showTab("add");
+    }
+  }
+});
+$("#hidden-tiles-list").addEventListener("click", (e) => {
+  const row = e.target.closest("[data-restore]");
+  if (row) showTile(row.dataset.restore);
+});
+
+// ===== Profil prénom =====
+const userNameInput = $("#user-name-input");
+if (userNameInput) {
+  userNameInput.addEventListener("input", () => {
+    profile.name = (userNameInput.value || "").trim() || "Fanny";
+    saveProfile();
+    updateGreeting();
+  });
+}
 
 // ===== Form =====
 const form = $("#form-plein");
@@ -723,7 +1120,6 @@ function resetForm() {
   form.querySelector('[name="date"]').valueAsDate = new Date();
   customLabel.classList.add("hidden");
   $("#form-section-title").textContent = "DÉTAILS";
-  $("#btn-cancel").classList.add("hidden");
   autoHint.textContent = "Saisis 2 champs sur 3 — le 3ᵉ se calcule tout seul.";
   fillPredictions();
 }
@@ -742,7 +1138,7 @@ function fillPredictions() {
   litresIsEstimate = true;
   autoHint.textContent = `Estimations : ~${fmtNum(pred.kmPerDay)} km/jour depuis ${pred.daysSinceLast} jour${pred.daysSinceLast > 1 ? "s" : ""}. Modifie avec les valeurs réelles du compteur.`;
 }
-$("#btn-cancel").addEventListener("click", () => { resetForm(); showTab("history"); });
+$("#btn-cancel").addEventListener("click", () => { resetForm(); showTab("today"); });
 
 form.addEventListener("submit", (e) => {
   e.preventDefault();
@@ -789,7 +1185,7 @@ form.addEventListener("submit", (e) => {
   save();
   refresh();
   resetForm();
-  showTab("history");
+  showTab("today");
 });
 
 // ===== History click → action sheet =====
@@ -827,7 +1223,6 @@ function editPlein(id) {
   }
   customLabel.classList.toggle("hidden", p.station !== "autre");
   $("#form-section-title").textContent = "MODIFIER LE PLEIN";
-  $("#btn-cancel").classList.remove("hidden");
   showTab("add");
 }
 
@@ -1017,7 +1412,9 @@ $("#vehicles-list").addEventListener("click", (e) => {
 // ===== Init =====
 $("#app-version").textContent = VERSION;
 form.querySelector('[name="date"]').valueAsDate = new Date();
-init();
+init().then(() => {
+  if (userNameInput) userNameInput.value = profile.name || "";
+});
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {

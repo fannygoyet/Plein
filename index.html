@@ -17,30 +17,35 @@
 </head>
 <body>
 
-<!-- ===== Navigation bar iOS ===== -->
+<!-- Nav bar iOS qui apparaît au scroll -->
 <header class="nav-bar" id="nav-bar">
   <div class="nav-bar-inner">
-    <span style="width:60px"></span>
+    <button type="button" class="nav-action" id="nav-edit-btn" aria-label="Modifier le tableau de bord">Modifier</button>
     <span class="nav-title" id="nav-title">Plein</span>
-    <span style="width:60px"></span>
+    <button type="button" class="nav-action" id="nav-add-btn" aria-label="Ajouter un plein">＋</button>
   </div>
 </header>
 
 <main>
-  <h1 class="large-title" id="large-title">Plein</h1>
-  <p class="large-title-sub" id="large-title-sub">—</p>
 
-  <!-- Segmented control (Apple Watch style) -->
-  <div class="segmented" role="tablist">
-    <button type="button" class="seg active" data-tab="add">Ajouter</button>
-    <button type="button" class="seg" data-tab="history">Historique</button>
-    <button type="button" class="seg" data-tab="stats">Stats</button>
-    <button type="button" class="seg" data-tab="charts">Graphes</button>
-    <button type="button" class="seg" data-tab="data">Données</button>
+<!-- ===== AUJOURD'HUI (dashboard) ===== -->
+<section id="tab-today" class="tab-panel active">
+  <div class="greeting">
+    <h1 class="greeting-line" id="greeting-text">Bonjour</h1>
+    <p class="greeting-date" id="greeting-date">—</p>
   </div>
 
-<!-- ===== AJOUTER ===== -->
-<section id="tab-add" class="tab-panel active">
+  <div class="dashboard" id="dashboard"></div>
+
+  <div class="dashboard-edit-actions hidden" id="edit-actions">
+    <p class="section-header" style="padding-top:0">MASQUÉS</p>
+    <div class="list" id="hidden-tiles-list"></div>
+    <p class="section-footer">Touche un module masqué pour le réafficher dans le tableau de bord.</p>
+  </div>
+</section>
+
+<!-- ===== AJOUTER (en sheet) ===== -->
+<section id="tab-add" class="tab-panel">
   <form id="form-plein" autocomplete="off" novalidate>
     <input type="hidden" name="id" />
 
@@ -114,7 +119,7 @@
 
     <div class="toolbar">
       <button type="submit" class="btn btn-filled">Enregistrer</button>
-      <button type="button" id="btn-cancel" class="btn btn-plain hidden">Annuler</button>
+      <button type="button" id="btn-cancel" class="btn btn-plain">Annuler</button>
     </div>
   </form>
 </section>
@@ -177,6 +182,15 @@
 
 <!-- ===== DONNÉES ===== -->
 <section id="tab-data" class="tab-panel">
+  <p class="section-header">PROFIL</p>
+  <div class="list">
+    <label class="list-row">
+      <span class="row-label">Prénom</span>
+      <input class="row-input" type="text" id="user-name-input" placeholder="Fanny" />
+    </label>
+  </div>
+  <p class="section-footer">Utilisé pour le message de bienvenue sur le tableau de bord.</p>
+
   <p class="section-header">VÉHICULES</p>
   <div class="list" id="vehicles-list"></div>
   <div class="list" style="margin-top: 8px">
@@ -210,7 +224,7 @@
       <span>Tout effacer</span>
     </button>
   </div>
-  <p class="section-footer">La réinitialisation recharge les 70 pleins parsés depuis l'export Facebook initial.</p>
+  <p class="section-footer">La réinitialisation recharge les pleins parsés depuis l'export Facebook initial (si disponible localement).</p>
 
   <p class="section-header">À PROPOS</p>
   <div class="list">
@@ -226,6 +240,29 @@
 </section>
 
 </main>
+
+<!-- Bottom Tab Bar iOS -->
+<nav class="tab-bar" role="tablist">
+  <button type="button" class="tab-bar-btn active" data-tab="today" aria-label="Aujourd'hui">
+    <span class="tab-icon">⌂</span>
+    <span class="tab-label">Aujourd'hui</span>
+  </button>
+  <button type="button" class="tab-bar-btn" data-tab="history" aria-label="Historique">
+    <span class="tab-icon">≡</span>
+    <span class="tab-label">Historique</span>
+  </button>
+  <button type="button" class="tab-bar-btn tab-bar-fab" data-tab="add" aria-label="Ajouter un plein">
+    <span class="tab-icon-fab">＋</span>
+  </button>
+  <button type="button" class="tab-bar-btn" data-tab="stats" aria-label="Statistiques">
+    <span class="tab-icon">▦</span>
+    <span class="tab-label">Stats</span>
+  </button>
+  <button type="button" class="tab-bar-btn" data-tab="data" aria-label="Données">
+    <span class="tab-icon">⚙</span>
+    <span class="tab-label">Données</span>
+  </button>
+</nav>
 
 <div id="toast" class="toast"></div>
 
