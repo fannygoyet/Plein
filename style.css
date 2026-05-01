@@ -373,6 +373,56 @@ body {
 }
 .tab-bar-fab .tab-label { display: none; }
 
+/* === Backup banner === */
+.backup-banner {
+  margin: 0 16px 16px;
+  background: linear-gradient(135deg, rgba(255,45,85,0.10) 0%, rgba(175,82,222,0.10) 100%);
+  border: 1px solid rgba(255,45,85,0.20);
+  border-radius: var(--radius-large);
+  padding: 14px 14px 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.backup-banner-icon { font-size: 24px; flex-shrink: 0; }
+.backup-banner-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.backup-banner-text strong {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.24px;
+  color: var(--ios-text);
+}
+.backup-banner-text span {
+  font-size: 13px;
+  color: var(--ios-text-2);
+  letter-spacing: -0.08px;
+}
+.backup-banner-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-shrink: 0;
+}
+.btn.btn-sm {
+  width: auto;
+  padding: 8px 14px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.btn.btn-plain.btn-sm {
+  padding: 4px 10px;
+  font-size: 22px;
+  line-height: 1;
+  font-weight: 300;
+  color: var(--ios-text-2);
+}
+
 /* (segmented control supprimé : remplacé par la tab bar bas) */
 
 /* === Conteneur de page === */

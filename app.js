@@ -5,6 +5,7 @@ const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
 const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
 const PROFILE_KEY = "plein_profile_v1";       // prénom de l'utilisateur
+const LAST_BACKUP_KEY = "plein_last_backup";  // date ISO de la dernière sauvegarde
 
 // Véhicule par défaut : la Mégane (toutes les données du seed lui sont rattachées)
 const DEFAULT_VEHICLE = {
@@ -1241,8 +1242,86 @@ $("#hist-search").addEventListener("input", renderHistory);
 // ===== Data tab =====
 $("#btn-export-json").addEventListener("click", () => {
   const blob = new Blob([JSON.stringify(pleins, null, 2)], { type: "application/json" });
-  downloadBlob(blob, `mes-pleins-${todayStr()}.json`);
+  downloadBlob(blob, `plein-backup-${todayStr()}.json`);
 });
+
+// ===== Sauvegarde iCloud (via Share API iOS) =====
+async function backupToICloud() {
+  const data = JSON.stringify(pleins, null, 2);
+  const filename = `plein-backup-${todayStr()}.json`;
+  const file = new File([data], filename, { type: "application/json" });
+
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try {
+      await navigator.share({
+        files: [file],
+        title: "Sauvegarde Plein",
+        text: `${pleins.length} pleins · sauvegardé le ${fmtDateLong(todayStr())}`,
+      });
+      localStorage.setItem(LAST_BACKUP_KEY, todayStr());
+      updateBackupStatus();
+      toast("Sauvegarde envoyée — choisis 'Enregistrer dans Fichiers' → iCloud", "success");
+    } catch (e) {
+      if (e.name !== "AbortError") toast("Sauvegarde annulée", "");
+    }
+  } else {
+    // Fallback : téléchargement classique (desktop / vieux Safari)
+    const blob = new Blob([data], { type: "application/json" });
+    downloadBlob(blob, filename);
+    localStorage.setItem(LAST_BACKUP_KEY, todayStr());
+    updateBackupStatus();
+  }
+}
+
+function getLastBackupDays() {
+  const last = localStorage.getItem(LAST_BACKUP_KEY);
+  if (!last) return null;
+  const d = (Date.now() - new Date(last).getTime()) / (24 * 3600 * 1000);
+  return Math.floor(d);
+}
+
+function updateBackupStatus() {
+  const days = getLastBackupDays();
+  const el = $("#backup-status");
+  if (!el) return;
+  if (days === null) {
+    el.textContent = "Jamais sauvegardé.";
+    el.style.color = "var(--ios-red)";
+  } else if (days === 0) {
+    el.textContent = "Sauvegardé aujourd'hui ✓";
+    el.style.color = "var(--ios-green)";
+  } else if (days < 30) {
+    el.textContent = `Dernière sauvegarde il y a ${days} jour${days > 1 ? "s" : ""}.`;
+    el.style.color = "var(--ios-text-2)";
+  } else {
+    el.textContent = `Dernière sauvegarde il y a ${days} jours — pense à sauvegarder !`;
+    el.style.color = "var(--ios-orange)";
+  }
+}
+
+function maybePromptBackup() {
+  // Si jamais sauvegardé OU > 30 jours, on propose à l'ouverture (1 fois par jour max)
+  const days = getLastBackupDays();
+  const lastPrompt = localStorage.getItem("plein_last_backup_prompt");
+  const today = todayStr();
+  if (lastPrompt === today) return; // déjà demandé aujourd'hui
+  if (days !== null && days < 30) return; // pas besoin
+  if (pleins.length === 0) return; // rien à sauver
+  // Petit délai pour que l'app finisse son init avant de "popper" le banner
+  setTimeout(() => {
+    localStorage.setItem("plein_last_backup_prompt", today);
+    showBackupBanner();
+  }, 1200);
+}
+
+function showBackupBanner() {
+  const banner = $("#backup-banner");
+  if (banner) banner.classList.remove("hidden");
+}
+function hideBackupBanner() {
+  const banner = $("#backup-banner");
+  if (banner) banner.classList.add("hidden");
+}
 $("#btn-export-csv").addEventListener("click", () => {
   const headers = ["date", "vehicle_id", "station", "station_custom", "km", "litres", "prix_litre", "total", "missed_before"];
   const lines = [headers.join(",")];
@@ -1409,11 +1488,21 @@ $("#vehicles-list").addEventListener("click", (e) => {
 });
 
 
+// ===== Boutons sauvegarde =====
+const btnBackupICloud = $("#btn-backup-icloud");
+if (btnBackupICloud) btnBackupICloud.addEventListener("click", backupToICloud);
+const bannerBackupNow = $("#banner-backup-now");
+if (bannerBackupNow) bannerBackupNow.addEventListener("click", () => { backupToICloud(); hideBackupBanner(); });
+const bannerDismiss = $("#banner-dismiss");
+if (bannerDismiss) bannerDismiss.addEventListener("click", hideBackupBanner);
+
 // ===== Init =====
 $("#app-version").textContent = VERSION;
 form.querySelector('[name="date"]').valueAsDate = new Date();
 init().then(() => {
   if (userNameInput) userNameInput.value = profile.name || "";
+  updateBackupStatus();
+  maybePromptBackup();
 });
 
 if ("serviceWorker" in navigator) {

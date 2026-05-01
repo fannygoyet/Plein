@@ -35,6 +35,18 @@
     <p class="greeting-date" id="greeting-date">—</p>
   </div>
 
+  <div class="backup-banner hidden" id="backup-banner">
+    <div class="backup-banner-icon">☁️</div>
+    <div class="backup-banner-text">
+      <strong>Sauvegarde recommandée</strong>
+      <span>Une copie sur iCloud te protège si tu désinstalles l'app.</span>
+    </div>
+    <div class="backup-banner-actions">
+      <button class="btn btn-tinted btn-sm" id="banner-backup-now">Sauvegarder</button>
+      <button class="btn btn-plain btn-sm" id="banner-dismiss" aria-label="Fermer">×</button>
+    </div>
+  </div>
+
   <div class="dashboard" id="dashboard"></div>
 
   <div class="dashboard-edit-actions hidden" id="edit-actions">
@@ -202,18 +214,24 @@
 
   <p class="section-header">SAUVEGARDE</p>
   <div class="list">
+    <button class="btn-row" id="btn-backup-icloud" style="font-weight:600">
+      <span>☁️ Sauvegarder vers iCloud / Fichiers</span>
+    </button>
     <button class="btn-row" id="btn-export-json">
-      <span>Exporter en JSON</span>
+      <span>Exporter en JSON (téléchargement)</span>
     </button>
     <button class="btn-row" id="btn-export-csv">
-      <span>Exporter en CSV</span>
+      <span>Exporter en CSV (téléchargement)</span>
     </button>
     <label class="btn-row" style="display:block">
       <span>Importer (JSON ou CSV)</span>
       <input type="file" id="file-import" accept=".json,.csv" hidden />
     </label>
   </div>
-  <p class="section-footer">Tes données restent uniquement sur ton iPhone. Pense à exporter régulièrement pour faire une sauvegarde.</p>
+  <p class="section-footer">
+    <span id="backup-status">—</span><br />
+    L'app te rappellera de sauvegarder une fois par mois. Astuce : la première fois, choisis "Enregistrer dans Fichiers" → un dossier iCloud Drive — ce dossier sera proposé par défaut les fois suivantes.
+  </p>
 
   <p class="section-header">RÉINITIALISATION</p>
   <div class="list">
