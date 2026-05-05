@@ -1,6 +1,6 @@
 /* Mes Pleins — design iOS natif (Settings.app / Health) */
 
-const VERSION = "1.6.3";
+const VERSION = "1.7.0";
 const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
 const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
@@ -298,37 +298,22 @@ function renderTile(id) {
         <div class="tile-sub">depuis ${fmtDate(stats.rolling12Start)} · voir détail ›</div>`;
     }
     case "conso": {
-      // Dernière conso entre 2 pleins + moyenne 12 mois glissants
-      const chrono = [...ap].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.km - b.km));
-      let lastConso = null;
-      for (let i = chrono.length - 1; i > 0; i--) {
-        const dKm = chrono[i].km - chrono[i - 1].km;
-        const c = consoForPlein(chrono[i], chrono[i - 1]);
-        if (c != null && dKm >= 250 && c < 15) { lastConso = c; break; }
-      }
-      // Moyenne 12 mois glissants (depuis 12 mois en arrière jour pour jour)
-      const cutoff = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-      const recent = chrono.filter((p) => p.date >= cutoff);
-      let avg12 = null;
-      if (recent.length >= 2) {
-        const segs = buildSegments(recent);
-        let sL = 0, sK = 0;
-        for (const s of segs) {
-          if (s.length < 2) continue;
-          sL += s.slice(1).reduce((a, p) => a + (Number(p.litres) || 0), 0);
-          sK += s[s.length - 1].km - s[0].km;
-        }
-        if (sK > 0) avg12 = (sL / sK) * 100;
-      }
-      const main = lastConso != null ? `${fmtNum(lastConso, 2)}<span class="unit">L/100</span>`
-                                     : (stats && stats.consoMoyenne ? `${fmtNum(stats.consoMoyenne, 2)}<span class="unit">L/100</span>` : "—");
-      const subLine = lastConso != null
-        ? `dernier plein${avg12 != null ? ` · moy 12 mois : ${fmtNum(avg12, 2)} L/100` : ""}`
-        : "moyenne globale";
+      // Dernière conso (entre les 2 derniers pleins COMPLETS) + moyenne 12 mois
+      // Toutes deux calculées à partir des données et évoluent à chaque nouveau plein.
+      if (!stats) return null;
+      const main = stats.consoLastSeg != null
+        ? `${fmtNum(stats.consoLastSeg, 2)}<span class="unit">L/100</span>`
+        : (stats.consoRecente != null
+            ? `${fmtNum(stats.consoRecente, 2)}<span class="unit">L/100</span>`
+            : (stats.consoMoyenne != null ? `${fmtNum(stats.consoMoyenne, 2)}<span class="unit">L/100</span>` : "—"));
+      const subParts = [];
+      if (stats.consoLastSeg != null) subParts.push("dernier plein complet");
+      if (stats.consoRecente != null) subParts.push(`12 mois : ${fmtNum(stats.consoRecente, 2)}`);
+      else if (stats.consoMoyenne != null) subParts.push(`global : ${fmtNum(stats.consoMoyenne, 2)}`);
       return `
         <div class="tile-label"><span class="tile-emoji">⛽</span>Conso</div>
         <div class="tile-value">${main}</div>
-        <div class="tile-sub">${subLine} · voir détail ›</div>`;
+        <div class="tile-sub">${subParts.join(" · ")} · voir détail ›</div>`;
     }
     case "lastFill": {
       if (ap.length === 0) return null;
@@ -701,37 +686,65 @@ function isMissedTransition(p, prev) {
   if (dKm > maxRangeFor(p)) return true;
   // Plein > taille du réservoir = impossible physiquement → un plein a sauté
   if (p.litres && Number(p.litres) > tankSizeFor(p) * 1.05) return true;
-  // Conso implausiblement basse → soit plein oublié, soit refill partiel : on écarte
-  if (p.litres && dKm > 0) {
-    const c = (Number(p.litres) / dKm) * 100;
-    if (c < MIN_PLAUSIBLE_CONSO) return true;
-  }
   return false;
 }
 
+// Un plein est dit "complet" si la quantité ajoutée est ≥ 70 % du réservoir.
+// Les autres sont des appoints — leurs litres comptent dans le cumul mais
+// ils ne servent pas de point de référence pour mesurer la conso.
+const FULL_FILL_RATIO = 0.7;
+function isFullFill(p) {
+  if (!p || !p.litres) return false;
+  return Number(p.litres) >= tankSizeFor(p) * FULL_FILL_RATIO;
+}
+
 function consoForPlein(p, prev) {
+  // Conso "instantanée" entre deux pleins consécutifs.
+  // N'a de sens que si les deux sont des pleins COMPLETS (même niveau de réservoir).
   if (!prev || !p.km || !prev.km || !p.litres) return null;
   if (isMissedTransition(p, prev)) return null;
+  if (!isFullFill(p) || !isFullFill(prev)) return null;
   const dKm = p.km - prev.km;
   if (dKm <= 0) return null;
   return (p.litres / dKm) * 100;
 }
 
-function buildSegments(chrono) {
+// Segments ancrés : chaque segment commence ET finit par un plein complet.
+// Les appoints intermédiaires sont conservés (leurs litres comptent dans le total
+// brûlé), mais ne servent jamais d'ancre. Une transition ratée ferme un segment.
+function buildAnchoredSegments(chrono) {
   const segs = [];
-  let cur = [];
+  let cur = null;
   for (let i = 0; i < chrono.length; i++) {
     const p = chrono[i];
     const prev = i > 0 ? chrono[i - 1] : null;
-    if (isMissedTransition(p, prev) && cur.length > 0) {
+    if (isMissedTransition(p, prev)) {
+      if (cur && cur.length >= 2) segs.push(cur);
+      cur = isFullFill(p) ? [p] : null;
+      continue;
+    }
+    if (!cur) {
+      if (isFullFill(p)) cur = [p];
+      continue;
+    }
+    cur.push(p);
+    // Un plein complet ferme le segment courant ET amorce le suivant
+    if (isFullFill(p) && cur.length >= 2) {
       segs.push(cur);
       cur = [p];
-    } else {
-      cur.push(p);
     }
   }
-  if (cur.length > 0) segs.push(cur);
   return segs;
+}
+
+// Conso d'un segment ancré : somme des litres ajoutés après l'ancre de départ
+// (incluant l'ancre de fin et tous les appoints intermédiaires) / km parcourus.
+function consoForSegment(seg) {
+  if (!seg || seg.length < 2) return null;
+  const km = seg[seg.length - 1].km - seg[0].km;
+  if (km <= 0) return null;
+  const litres = seg.slice(1).reduce((s, p) => s + (Number(p.litres) || 0), 0);
+  return { conso: (litres / km) * 100, km, litres };
 }
 
 function kmSincePeriod(chrono, periodStartIso) {
@@ -765,7 +778,9 @@ function predictNextPlein() {
   const tank = tankSizeFor(last);
 
   const stats = computeStats();
-  const conso = stats && stats.consoMoyenne ? stats.consoMoyenne : null;
+  // On privilégie la conso RÉCENTE (12 mois) — elle évolue avec les données
+  // et reflète mieux ton style de conduite actuel que la moyenne globale.
+  const conso = stats && (stats.consoRecente || stats.consoMoyenne);
   if (!conso || conso <= 0) return null;
 
   // Autonomie pour le PROCHAIN cycle = litres mis au dernier plein × 100 / conso
@@ -827,14 +842,28 @@ function computeStats(scope) {
   const totalLitres = sumBy(sorted, "litres");
   const totalKm = last.km - first.km;
 
-  const segments = buildSegments(sorted);
-  let segLitres = 0, segKm = 0;
+  // Conso = somme des litres ajoutés entre deux pleins COMPLETS / km parcourus.
+  // Les segments dont la conso apparente est aberrante (< 3,5 ou > 12 L/100)
+  // signalent un plein oublié ou des données erronées : on les écarte.
+  const segments = buildAnchoredSegments(sorted);
+  const validSegs = [];
   for (const seg of segments) {
-    if (seg.length < 2) continue;
-    segLitres += seg.slice(1).reduce((s, p) => s + (Number(p.litres) || 0), 0);
-    segKm += seg[seg.length - 1].km - seg[0].km;
+    const c = consoForSegment(seg);
+    if (!c) continue;
+    if (c.conso < MIN_PLAUSIBLE_CONSO || c.conso > 12) continue;
+    validSegs.push({ seg, ...c });
   }
-  const consoMoyenne = segKm > 0 ? (segLitres / segKm) * 100 : null;
+  const sumLitres = validSegs.reduce((s, x) => s + x.litres, 0);
+  const sumKm = validSegs.reduce((s, x) => s + x.km, 0);
+  const consoMoyenne = sumKm > 0 ? (sumLitres / sumKm) * 100 : null;
+  // Conso récente : segments dont l'ancre de FIN tombe dans les 12 derniers mois
+  const cutoffISO = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const recentSegs = validSegs.filter((x) => x.seg[x.seg.length - 1].date >= cutoffISO);
+  const recentL = recentSegs.reduce((s, x) => s + x.litres, 0);
+  const recentK = recentSegs.reduce((s, x) => s + x.km, 0);
+  const consoRecente = recentK > 0 ? (recentL / recentK) * 100 : null;
+  // Conso du DERNIER segment ancré (= entre les 2 derniers pleins complets)
+  const consoLastSeg = validSegs.length > 0 ? validSegs[validSegs.length - 1].conso : null;
   const prixMoyen = totalLitres > 0 ? totalEur / totalLitres : null;
 
   const dStart = new Date(first.date), dEnd = new Date(last.date);
@@ -882,7 +911,8 @@ function computeStats(scope) {
 
   return {
     nb: sorted.length, totalEur, totalLitres, totalKm,
-    consoMoyenne, prixMoyen, eurParAn, kmParAn, eurParKm,
+    consoMoyenne, consoRecente, consoLastSeg,
+    prixMoyen, eurParAn, kmParAn, eurParKm,
     kmYTD, km12Months, rolling12Start, missedCount, first, last,
     bestStation, worstStation, stationConso,
   };
@@ -1333,48 +1363,33 @@ function openDetailSheet(kind) {
 
   else if (kind === "conso") {
     sheetTitle.textContent = "Consommation";
-    const points = [];
-    for (let i = 1; i < chrono.length; i++) {
-      const dKm = chrono[i].km - chrono[i - 1].km;
-      const c = consoForPlein(chrono[i], chrono[i - 1]);
-      if (c != null && dKm >= 250 && c < 15) {
-        points.push({ date: chrono[i].date, conso: c, km: chrono[i].km, station: chrono[i].station, station_custom: chrono[i].station_custom });
-      }
-    }
-    const last20 = points.slice(-20);
-    const cutoff = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-    const recent = chrono.filter((p) => p.date >= cutoff);
-    let avg12 = null;
-    if (recent.length >= 2) {
-      const segs = buildSegments(recent);
-      let sL = 0, sK = 0;
-      for (const s of segs) {
-        if (s.length < 2) continue;
-        sL += s.slice(1).reduce((a, p) => a + (Number(p.litres) || 0), 0);
-        sK += s[s.length - 1].km - s[0].km;
-      }
-      if (sK > 0) avg12 = (sL / sK) * 100;
-    }
-    const lastConso = points.length ? points[points.length - 1].conso : null;
-    const allAvg = points.length ? (points.reduce((a, p) => a + p.conso, 0) / points.length) : null;
+    // Un point par segment ancré (entre 2 pleins complets)
+    const segs = buildAnchoredSegments(chrono).map((seg) => {
+      const c = consoForSegment(seg);
+      if (!c || c.conso < MIN_PLAUSIBLE_CONSO || c.conso > 12) return null;
+      const last = seg[seg.length - 1];
+      return { date: last.date, conso: c.conso, km: c.km, litres: c.litres, station: last.station, station_custom: last.station_custom, n: seg.length };
+    }).filter(Boolean);
+    const last20 = segs.slice(-20);
+    const stats = computeStats();
     sheetBody.innerHTML = `
       <p class="section-header">RÉSUMÉ</p>
       <div class="list">
-        <div class="list-row"><span class="row-label">Dernière conso</span><span class="row-value">${lastConso != null ? fmtNum(lastConso, 2) + " L/100" : "—"}</span></div>
-        <div class="list-row"><span class="row-label">Moyenne 12 mois</span><span class="row-value">${avg12 != null ? fmtNum(avg12, 2) + " L/100" : "—"}</span></div>
-        <div class="list-row"><span class="row-label">Moyenne globale</span><span class="row-value">${allAvg != null ? fmtNum(allAvg, 2) + " L/100" : "—"}</span></div>
+        <div class="list-row"><span class="row-label">Dernier segment</span><span class="row-value">${stats && stats.consoLastSeg != null ? fmtNum(stats.consoLastSeg, 2) + " L/100" : "—"}</span></div>
+        <div class="list-row"><span class="row-label">12 mois glissants</span><span class="row-value">${stats && stats.consoRecente != null ? fmtNum(stats.consoRecente, 2) + " L/100" : "—"}</span></div>
+        <div class="list-row"><span class="row-label">Moyenne globale</span><span class="row-value">${stats && stats.consoMoyenne != null ? fmtNum(stats.consoMoyenne, 2) + " L/100" : "—"}</span></div>
       </div>
-      <div class="chart-card"><h4>Conso L/100 km par plein</h4><canvas id="sheet-canvas"></canvas></div>
-      <p class="section-header">PAR PLEIN</p>
+      <div class="chart-card"><h4>Conso entre pleins complets</h4><canvas id="sheet-canvas"></canvas></div>
+      <p class="section-header">PAR SEGMENT</p>
       <div class="list">
-        ${points.slice().reverse().map((p) => `
+        ${segs.slice().reverse().map((p) => `
           <div class="list-row">
-            <span class="row-label">${fmtDate(p.date)}<br><span style="font-size:13px;color:var(--ios-text-2)">${escapeHtml(stationLabel(p.station, p.station_custom))}</span></span>
+            <span class="row-label">${fmtDate(p.date)}<br><span style="font-size:13px;color:var(--ios-text-2)">${escapeHtml(stationLabel(p.station, p.station_custom))} · ${fmtNum(p.km)}&nbsp;km · ${fmtNum(p.litres,1)}&nbsp;L</span></span>
             <span class="row-value">${fmtNum(p.conso, 2)} L/100</span>
           </div>
         `).join("")}
       </div>
-      <p class="section-footer">Les pleins marqués "raté" sont exclus du calcul.</p>
+      <p class="section-footer">Un segment = trajet entre 2 pleins complets (≥${Math.round(tankSizeFor(last)*FULL_FILL_RATIO)}&nbsp;L). Les appoints intermédiaires sont cumulés mais ne servent pas d'ancre.</p>
     `;
     sheetChart = new Chart($("#sheet-canvas"), {
       type: "line",
