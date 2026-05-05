@@ -1,6 +1,6 @@
 /* Mes Pleins — design iOS natif (Settings.app / Health) */
 
-const VERSION = "1.6.1";
+const VERSION = "1.6.2";
 const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
 const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
@@ -752,22 +752,33 @@ function sumBy(arr, key) {
 }
 
 function predictNextPlein() {
-  // Estime le PROCHAIN plein (km au compteur + litres à mettre).
-  // - autonomie moyenne entre 2 pleins (sur les 6 derniers mois ou tout l'historique)
-  // - on ignore les transitions ratées pour ne pas gonfler l'autonomie
-  // - km/jour : pour estimer le nombre de jours restants avant le prochain plein
+  // Logique : la quantité de carburant ajoutée à un plein = ce qui a été brûlé
+  // depuis le précédent plein (à niveau de remplissage équivalent). Donc :
+  //   km parcourus avant le prochain plein ≈ litres du dernier plein × 100 / conso
+  // Ça gère naturellement les demi-pleins (10 L → ~170 km) ET les pleins complets
+  // (55 L → ~900 km), sans biais lié au comportement passé.
   const ap = activePleins();
   if (ap.length < 2) return null;
 
   const chrono = [...ap].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.km - b.km));
   const last = chrono[chrono.length - 1];
+  const tank = tankSizeFor(last);
 
+  const stats = computeStats();
+  const conso = stats && stats.consoMoyenne ? stats.consoMoyenne : null;
+  if (!conso || conso <= 0) return null;
+
+  // Autonomie pour le PROCHAIN cycle = litres mis au dernier plein × 100 / conso
+  const lastLitres = Number(last.litres) || 0;
+  const expectedKm = lastLitres > 0 ? (lastLitres * 100) / conso : null;
+  // Autonomie max théorique (réservoir plein → vide)
+  const maxAutonomy = (tank * 100) / conso;
+
+  // Cadence (jours/km par jour) : on regarde les transitions valides récentes
   const cutoff = new Date(Date.now() - 180 * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const recent = chrono.filter((p) => p.date >= cutoff);
   const usable = recent.length >= 3 ? recent : chrono;
-
-  // Autonomie moyenne par plein = somme des Δkm valides / nombre de transitions
-  let totalKm = 0, totalLitres = 0, n = 0, totalDays = 0;
+  let totalKm = 0, totalDays = 0, totalLitres = 0, n = 0;
   for (let i = 1; i < usable.length; i++) {
     const prev = usable[i - 1], cur = usable[i];
     if (isMissedTransition(cur, prev)) continue;
@@ -778,21 +789,31 @@ function predictNextPlein() {
     totalDays += (new Date(cur.date) - new Date(prev.date)) / (24 * 3600 * 1000);
     n++;
   }
-  if (n === 0) return null;
+  const kmPerDay = (totalDays > 0) ? Math.round(totalKm / totalDays) : null;
+  // Pleins "presque pleins" (≥ 70% du réservoir) pour estimer combien de litres
+  // mettre au prochain passage. Sinon on retombe sur la moyenne globale.
+  const fullFills = [];
+  for (let i = 1; i < usable.length; i++) {
+    const cur = usable[i];
+    if (isMissedTransition(cur, usable[i - 1])) continue;
+    const L = Number(cur.litres) || 0;
+    if (L >= tank * 0.7) fullFills.push(L);
+  }
+  const predictedLitres = fullFills.length > 0
+    ? +(fullFills.reduce((a, b) => a + b, 0) / fullFills.length).toFixed(1)
+    : (n > 0 ? +(totalLitres / n).toFixed(1) : null);
 
-  const avgKmPerFill = totalKm / n;
-  const avgLitresPerFill = totalLitres / n;
-  const avgDaysPerFill = totalDays / n;
+  const predictedKm = Math.round(last.km + (expectedKm || maxAutonomy));
+  const daysUntilNext = (kmPerDay && expectedKm) ? Math.max(1, Math.round(expectedKm / kmPerDay)) : null;
 
-  const today = new Date();
-  const daysSinceLast = Math.max(0, Math.round((today - new Date(last.date)) / (24 * 3600 * 1000)));
-  const daysUntilNext = Math.max(1, Math.round(avgDaysPerFill - daysSinceLast));
-
-  const predictedKm = Math.round(last.km + avgKmPerFill);
-  const predictedLitres = avgLitresPerFill > 0 ? +avgLitresPerFill.toFixed(1) : null;
-  const kmPerDay = avgDaysPerFill > 0 ? Math.round(avgKmPerFill / avgDaysPerFill) : null;
-
-  return { km: predictedKm, litres: predictedLitres, kmPerDay, daysSinceLast, daysUntilNext, avgKmPerFill: Math.round(avgKmPerFill) };
+  return {
+    km: predictedKm,
+    litres: predictedLitres,
+    kmPerDay,
+    daysUntilNext,
+    avgKmPerFill: Math.round(expectedKm || maxAutonomy),
+    maxAutonomy: Math.round(maxAutonomy),
+  };
 }
 
 function computeStats(scope) {
