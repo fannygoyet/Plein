@@ -1,6 +1,6 @@
 /* Mes Pleins — design iOS natif (Settings.app / Health) */
 
-const VERSION = "1.6.0";
+const VERSION = "1.6.1";
 const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
 const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
@@ -343,10 +343,13 @@ function renderTile(id) {
       const pred = predictNextPlein();
       if (!pred) return null;
       const litresStr = pred.litres ? ` · ~${fmtNum(pred.litres, 1)} L` : "";
+      const whenStr = pred.daysUntilNext != null
+        ? `dans ~${pred.daysUntilNext}j${pred.kmPerDay ? ` (${pred.kmPerDay} km/jour)` : ""}`
+        : (pred.kmPerDay ? `${pred.kmPerDay} km/jour` : "");
       return `
         <div class="tile-label"><span class="tile-icon bg-orange">◇</span>Prochain plein estimé</div>
         <div class="tile-value">~${fmtNum(pred.km)}<span class="unit">km</span></div>
-        <div class="tile-sub">${pred.kmPerDay} km/jour · ${pred.daysSinceLast}j depuis le dernier${litresStr}</div>`;
+        <div class="tile-sub">${whenStr}${litresStr}</div>`;
     }
     case "totalSpent": {
       if (!stats) return null;
@@ -749,36 +752,47 @@ function sumBy(arr, key) {
 }
 
 function predictNextPlein() {
-  // Estime km à aujourd'hui + litres pour un plein "type" sur le véhicule actif.
-  // - km/jour : moyenne sur les 6 derniers mois (ou tout l'historique si < 2 pleins récents)
-  // - litres : conso moyenne (segments) appliquée à (predictedKm - lastKm)
+  // Estime le PROCHAIN plein (km au compteur + litres à mettre).
+  // - autonomie moyenne entre 2 pleins (sur les 6 derniers mois ou tout l'historique)
+  // - on ignore les transitions ratées pour ne pas gonfler l'autonomie
+  // - km/jour : pour estimer le nombre de jours restants avant le prochain plein
   const ap = activePleins();
   if (ap.length < 2) return null;
 
-  const sortedDesc = [...ap].sort((a, b) => (a.date < b.date ? 1 : -1));
-  const last = sortedDesc[0];
+  const chrono = [...ap].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.km - b.km));
+  const last = chrono[chrono.length - 1];
 
   const cutoff = new Date(Date.now() - 180 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-  const recent = ap.filter((p) => p.date >= cutoff);
-  const usable = recent.length >= 2 ? recent : ap;
-  const usSorted = [...usable].sort((a, b) => (a.date < b.date ? -1 : 1));
-  const u0 = usSorted[0], uN = usSorted[usSorted.length - 1];
-  const days = (new Date(uN.date) - new Date(u0.date)) / (24 * 3600 * 1000);
-  if (days <= 0 || uN.km <= u0.km) return null;
-  const kmPerDay = (uN.km - u0.km) / days;
+  const recent = chrono.filter((p) => p.date >= cutoff);
+  const usable = recent.length >= 3 ? recent : chrono;
+
+  // Autonomie moyenne par plein = somme des Δkm valides / nombre de transitions
+  let totalKm = 0, totalLitres = 0, n = 0, totalDays = 0;
+  for (let i = 1; i < usable.length; i++) {
+    const prev = usable[i - 1], cur = usable[i];
+    if (isMissedTransition(cur, prev)) continue;
+    const dKm = cur.km - prev.km;
+    if (dKm <= 0) continue;
+    totalKm += dKm;
+    totalLitres += Number(cur.litres) || 0;
+    totalDays += (new Date(cur.date) - new Date(prev.date)) / (24 * 3600 * 1000);
+    n++;
+  }
+  if (n === 0) return null;
+
+  const avgKmPerFill = totalKm / n;
+  const avgLitresPerFill = totalLitres / n;
+  const avgDaysPerFill = totalDays / n;
 
   const today = new Date();
-  const daysSinceLast = Math.max(1, Math.round((today - new Date(last.date)) / (24 * 3600 * 1000)));
-  const predictedKm = Math.round(last.km + kmPerDay * daysSinceLast);
+  const daysSinceLast = Math.max(0, Math.round((today - new Date(last.date)) / (24 * 3600 * 1000)));
+  const daysUntilNext = Math.max(1, Math.round(avgDaysPerFill - daysSinceLast));
 
-  // Litres prévus à partir de la conso moyenne du véhicule
-  const stats = computeStats();
-  const dKm = predictedKm - last.km;
-  const predictedLitres = (stats && stats.consoMoyenne && dKm > 0)
-    ? +((dKm * stats.consoMoyenne) / 100).toFixed(2)
-    : null;
+  const predictedKm = Math.round(last.km + avgKmPerFill);
+  const predictedLitres = avgLitresPerFill > 0 ? +avgLitresPerFill.toFixed(1) : null;
+  const kmPerDay = avgDaysPerFill > 0 ? Math.round(avgKmPerFill / avgDaysPerFill) : null;
 
-  return { km: predictedKm, litres: predictedLitres, kmPerDay: Math.round(kmPerDay), daysSinceLast };
+  return { km: predictedKm, litres: predictedLitres, kmPerDay, daysSinceLast, daysUntilNext, avgKmPerFill: Math.round(avgKmPerFill) };
 }
 
 function computeStats(scope) {
@@ -1451,7 +1465,7 @@ function fillPredictions() {
   if (pred.km) kmI.value = pred.km;
   if (pred.litres) litresI.value = pred.litres;
   litresIsEstimate = true;
-  autoHint.textContent = `Estimations : ~${fmtNum(pred.kmPerDay)} km/jour depuis ${pred.daysSinceLast} jour${pred.daysSinceLast > 1 ? "s" : ""}. Modifie avec les valeurs réelles du compteur.`;
+  autoHint.textContent = `Estimation : ~${fmtNum(pred.avgKmPerFill)} km par plein${pred.kmPerDay ? ` (~${pred.kmPerDay} km/jour)` : ""}. Modifie avec les valeurs réelles du compteur.`;
 }
 $("#btn-cancel").addEventListener("click", () => { resetForm(); showTab("today"); });
 
