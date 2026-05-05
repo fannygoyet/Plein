@@ -842,11 +842,20 @@ main {
   color: var(--ios-orange);
 }
 .history-meta {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--ios-text-2);
   letter-spacing: -0.15px;
   margin-top: 1px;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.history-title span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .history-trail {
   text-align: right;

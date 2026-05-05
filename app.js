@@ -1,6 +1,6 @@
 /* Mes Pleins — design iOS natif (Settings.app / Health) */
 
-const VERSION = "1.6.2";
+const VERSION = "1.6.3";
 const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
 const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
@@ -923,7 +923,7 @@ function renderHistory() {
           <span>${stationLabel(p.station, p.station_custom)}</span>
           ${p.missed_before ? '<span class="badge-warning" title="Plein(s) raté(s) avant">⚠</span>' : ""}
         </div>
-        <div class="history-meta">${fmtDate(p.date)}${showVehicle ? " · " + escapeHtml(vehicleName(p.vehicle_id)) : ""} · ${fmtNum(p.km)} km · ${p.litres ? fmtNum(p.litres, 2) + " L" : "— L"}</div>
+        <div class="history-meta">${fmtDate(p.date)}${showVehicle ? " · " + escapeHtml(vehicleName(p.vehicle_id)) : ""} · ${fmtNum(p.km)}&nbsp;km · ${p.litres ? fmtNum(p.litres, 2) + "&nbsp;L" : "—&nbsp;L"}</div>
       </div>
       <div class="history-trail">
         <div class="price">${p.total != null ? fmtNum(p.total, 2) + " €" : "—"}</div>
