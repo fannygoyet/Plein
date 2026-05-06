@@ -1,10 +1,22 @@
 /* Mes Pleins — design iOS natif (Settings.app / Health) */
 
-const VERSION = "1.7.0";
+const VERSION = "1.8.0";
 const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
 const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
 const PROFILE_KEY = "plein_profile_v1";       // prénom de l'utilisateur
+const FUELFINDER_KEY = "plein_fuelfinder_v1"; // cache des prix carburant autour
+// Mapping carburant véhicule → clé de colonne utilisée par l'API
+// data.economie.gouv.fr (dataset prix-des-carburants-en-france-flux-instantane-v2).
+// Le dataset expose une colonne `<key>_prix` par type de carburant.
+const FUEL_API = {
+  gazole:     { key: "gazole", label: "Gazole" },
+  essence:    { key: "e10",    label: "E10" }, // SP95 est largement remplacé par E10
+  e85:        { key: "e85",    label: "E85" },
+  electrique: null,
+};
+const FUELFINDER_RADIUS_KM = 10;
+const FUELFINDER_TTL_MS = 30 * 60 * 1000; // 30 min
 const LAST_BACKUP_KEY = "plein_last_backup";  // date ISO de la dernière sauvegarde
 
 // Véhicule par défaut : la Mégane (toutes les données du seed lui sont rattachées)
@@ -161,6 +173,89 @@ function loadVehicles() {
 }
 function saveVehicles() { localStorage.setItem(VEHICLES_KEY, JSON.stringify(vehicles)); }
 
+// ===== Cache "carburant pas cher" =====
+function loadFuelFinder() {
+  const raw = localStorage.getItem(FUELFINDER_KEY);
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+function saveFuelFinder(data) { localStorage.setItem(FUELFINDER_KEY, JSON.stringify(data)); }
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const toRad = (x) => (x * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function getCurrentPosition() {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error("Géolocalisation indisponible"));
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lon: pos.coords.longitude }),
+      (err) => reject(new Error(
+        err.code === 1 ? "Localisation refusée"
+        : err.code === 2 ? "Position introuvable"
+        : err.code === 3 ? "Délai dépassé"
+        : "Erreur localisation"
+      )),
+      { enableHighAccuracy: false, timeout: 10000, maximumAge: 5 * 60 * 1000 }
+    );
+  });
+}
+
+async function fetchCheapFuel(lat, lon, fuelKey, radiusKm = FUELFINDER_RADIUS_KM) {
+  const priceField = `${fuelKey}_prix`;
+  const majField = `${fuelKey}_maj`;
+  const url = new URL("https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records");
+  url.searchParams.set("where", `${priceField} IS NOT NULL AND within_distance(geom, geom'POINT(${lon} ${lat})', ${radiusKm}km)`);
+  url.searchParams.set("order_by", priceField);
+  url.searchParams.set("select", `id,adresse,ville,cp,geom,${priceField},${majField}`);
+  url.searchParams.set("limit", "20");
+  const res = await fetch(url.toString());
+  if (!res.ok) throw new Error("API prix-carburants : " + res.status);
+  const data = await res.json();
+  return (data.results || []).map((r) => {
+    const sLat = r.geom?.lat ?? null;
+    const sLon = r.geom?.lon ?? null;
+    return {
+      id: r.id,
+      address: r.adresse || "",
+      cp: r.cp || "",
+      ville: r.ville || "",
+      price: Number(r[priceField]),
+      maj: r[majField] || null,
+      lat: sLat, lon: sLon,
+      distance: Number.isFinite(sLat) && Number.isFinite(sLon) ? haversineKm(lat, lon, sLat, sLon) : null,
+    };
+  }).filter((s) => Number.isFinite(s.price));
+}
+
+let fuelFinderState = "idle"; // "idle" | "loading" | "error"
+let fuelFinderError = null;
+
+async function refreshFuelFinder() {
+  if (fuelFinderState === "loading") return;
+  fuelFinderState = "loading";
+  fuelFinderError = null;
+  renderDashboard();
+  try {
+    const v = getActiveVehicle();
+    const f = FUEL_API[v?.fuel];
+    if (!f) throw new Error("Carburant non supporté par l'API");
+    const pos = await getCurrentPosition();
+    const results = await fetchCheapFuel(pos.lat, pos.lon, f.key);
+    saveFuelFinder({ ts: Date.now(), lat: pos.lat, lon: pos.lon, fuel: f.label, fuelKey: f.key, results });
+    fuelFinderState = "idle";
+  } catch (e) {
+    fuelFinderState = "error";
+    fuelFinderError = e?.message || "Erreur";
+  }
+  renderDashboard();
+}
+
 function getActiveVehicle() {
   return vehicles.find((v) => v.id === activeVehicleId) || vehicles.find((v) => v.active) || vehicles[0] || null;
 }
@@ -201,6 +296,7 @@ const TILES = [
   { id: "conso",      size: "small", label: "Conso moyenne" },
   { id: "lastFill",   size: "wide",  label: "Dernier plein" },
   { id: "nextFill",   size: "wide",  label: "Prochain plein estimé" },
+  { id: "cheapFuel",  size: "wide",  label: "Pas cher autour de moi" },
   { id: "totalSpent", size: "small", label: "Total dépensé" },
   { id: "lastPrice",  size: "small", label: "Prix actuel /L" },
   { id: "topStation", size: "small", label: "Station favorite" },
@@ -222,7 +318,7 @@ function renderDashboard() {
     if (!tile) return "";
     const html = renderTile(id);
     if (!html) return "";
-    const drillable = ["year", "month", "rolling12", "conso"].includes(id);
+    const drillable = ["year", "month", "rolling12", "conso", "cheapFuel"].includes(id);
     return `<div class="tile ${tile.size === "wide" ? "wide" : ""} ${tile.size === "hero" ? "hero" : ""} ${drillable ? "clickable" : ""}" data-tile="${id}" draggable="true">
       <span class="tile-remove" data-remove="${id}">−</span>
       ${html}
@@ -335,6 +431,50 @@ function renderTile(id) {
         <div class="tile-label"><span class="tile-icon bg-orange">◇</span>Prochain plein estimé</div>
         <div class="tile-value">~${fmtNum(pred.km)}<span class="unit">km</span></div>
         <div class="tile-sub">${whenStr}${litresStr}</div>`;
+    }
+    case "cheapFuel": {
+      if (fuelFinderState === "loading") {
+        return `
+          <div class="tile-label"><span class="tile-icon bg-pink">⛽</span>Pas cher autour</div>
+          <div class="tile-value" style="font-size:18px">Recherche…</div>
+          <div class="tile-sub">localisation + prix temps réel</div>`;
+      }
+      if (fuelFinderState === "error") {
+        return `
+          <div class="tile-label"><span class="tile-icon bg-pink">⛽</span>Pas cher autour</div>
+          <div class="tile-value" style="font-size:18px">Erreur</div>
+          <div class="tile-sub">${escapeHtml(fuelFinderError || "")} · touche pour réessayer</div>`;
+      }
+      const cached = loadFuelFinder();
+      const v = getActiveVehicle();
+      const f = FUEL_API[v?.fuel];
+      if (!f) {
+        return `
+          <div class="tile-label"><span class="tile-icon bg-pink">⛽</span>Pas cher autour</div>
+          <div class="tile-value" style="font-size:18px">Indispo</div>
+          <div class="tile-sub">carburant ${escapeHtml(v?.fuel || "?")} non couvert par l'API</div>`;
+      }
+      if (!cached || !cached.results || cached.results.length === 0) {
+        return `
+          <div class="tile-label"><span class="tile-icon bg-pink">⛽</span>Pas cher autour</div>
+          <div class="tile-value" style="font-size:18px">Touche pour voir</div>
+          <div class="tile-sub">les ${escapeHtml(f.label)} les moins chers à ${FUELFINDER_RADIUS_KM} km</div>`;
+      }
+      const top3 = cached.results.slice(0, 3);
+      const ageMin = Math.round((Date.now() - cached.ts) / 60000);
+      const ageStr = ageMin < 1 ? "à l'instant" : ageMin < 60 ? `il y a ${ageMin} min` : `il y a ${Math.round(ageMin / 60)} h`;
+      return `
+        <div class="tile-label"><span class="tile-icon bg-pink">⛽</span>Pas cher autour · ${escapeHtml(cached.fuel)}</div>
+        <div class="cheap-list">
+          ${top3.map((s) => `
+            <div class="cheap-row">
+              <span class="cheap-name">${escapeHtml(s.ville || s.address || "Station")}</span>
+              <span class="cheap-price">${fmtNum(s.price, 3)}<span class="unit">&nbsp;€/L</span></span>
+              <span class="cheap-dist">${s.distance != null ? s.distance.toFixed(1) + "&nbsp;km" : ""}</span>
+            </div>
+          `).join("")}
+        </div>
+        <div class="tile-sub">${ageStr} · voir détail ›</div>`;
     }
     case "totalSpent": {
       if (!stats) return null;
@@ -1227,6 +1367,14 @@ $("#dashboard").addEventListener("click", (e) => {
       showTab("add");
     } else if (id === "year" || id === "month" || id === "rolling12" || id === "conso") {
       openDetailSheet(id);
+    } else if (id === "cheapFuel") {
+      const cached = loadFuelFinder();
+      const stale = !cached || (Date.now() - cached.ts) > FUELFINDER_TTL_MS;
+      if (fuelFinderState === "error" || !cached || stale) {
+        refreshFuelFinder();
+      } else {
+        openDetailSheet("cheapFuel");
+      }
     }
   }
 });
@@ -1399,6 +1547,39 @@ function openDetailSheet(kind) {
       },
       options: { responsive: true, plugins: { legend: { display: false } }, scales: { y: { ticks: { font: { size: 10 } } }, x: { ticks: { font: { size: 10 }, maxTicksLimit: 6, maxRotation: 0 } } } },
     });
+  }
+
+  else if (kind === "cheapFuel") {
+    const cached = loadFuelFinder();
+    if (!cached) { closeDetailSheet(); return; }
+    sheetTitle.textContent = "Carburant pas cher autour";
+    const list = (cached.results || []).slice(0, 15);
+    const ageMin = Math.round((Date.now() - cached.ts) / 60000);
+    const ageStr = ageMin < 1 ? "à l'instant" : ageMin < 60 ? `il y a ${ageMin} min` : `il y a ${Math.round(ageMin / 60)} h`;
+    sheetBody.innerHTML = `
+      <p class="section-header">${escapeHtml(cached.fuel)} · ${list.length} stations · ${ageStr}</p>
+      <div class="list">
+        ${list.map((s, i) => {
+          const fullAddr = `${s.address || ""}, ${s.cp || ""} ${s.ville || ""}`.trim();
+          const mapsUrl = `https://maps.apple.com/?daddr=${encodeURIComponent(fullAddr)}`;
+          return `
+            <a class="list-row cheap-row-detail" href="${mapsUrl}" target="_blank" rel="noopener">
+              <div style="flex:1; min-width:0">
+                <div class="row-label" style="font-weight:500">${i + 1}. ${escapeHtml(s.ville || "Station")}</div>
+                <div style="font-size:13px; color:var(--ios-text-2); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis">${escapeHtml(s.address || "")} · ${escapeHtml(s.ville || "")}</div>
+              </div>
+              <div style="text-align:right; flex-shrink:0; margin-left:12px">
+                <div style="font-size:17px; font-weight:600; font-variant-numeric:tabular-nums">${fmtNum(s.price, 3)}&nbsp;€</div>
+                <div style="font-size:13px; color:var(--ios-text-2); font-variant-numeric:tabular-nums">${s.distance != null ? s.distance.toFixed(1) + "&nbsp;km" : ""}</div>
+              </div>
+            </a>
+          `;
+        }).join("")}
+      </div>
+      <p class="section-footer">Touche une station pour ouvrir l'itinéraire dans Plans. <button id="cheap-refresh" class="link-btn">Rafraîchir maintenant ›</button></p>
+    `;
+    const rb = $("#cheap-refresh");
+    if (rb) rb.addEventListener("click", async () => { closeDetailSheet(); await refreshFuelFinder(); });
   }
 
   detailSheet.classList.remove("hidden");

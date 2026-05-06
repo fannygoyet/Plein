@@ -3,7 +3,7 @@
  * atteignent toujours l'utilisateur en ligne, et l'app reste
  * fonctionnelle hors-ligne avec la dernière version cachée.
  */
-const VERSION = "v12-2026-05-01";
+const VERSION = "v13-2026-05-06";
 const CACHE = `plein-${VERSION}`;
 const APP_SHELL = [
   "./",
