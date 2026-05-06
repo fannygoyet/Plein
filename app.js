@@ -1,6 +1,6 @@
 /* Mes Pleins — design iOS natif (Settings.app / Health) */
 
-const VERSION = "1.8.0";
+const VERSION = "1.8.1";
 const STORAGE_KEY = "mes_pleins_v1";
 const VEHICLES_KEY = "plein_vehicles_v1";
 const DASHBOARD_KEY = "plein_dashboard_v1";   // ordre + visibilité des tuiles
@@ -693,6 +693,12 @@ async function init() {
 
   // Dashboard layout
   dashboardLayout = loadDashboard() || { order: TILES.map((t) => t.id), hidden: [] };
+  // Migration : si on ajoute une nouvelle tuile dans TILES, on l'ajoute à
+  // l'ordre sauvegardé pour qu'elle apparaisse pour les utilisateurs existants.
+  const known = new Set([...(dashboardLayout.order || []), ...(dashboardLayout.hidden || [])]);
+  for (const t of TILES) {
+    if (!known.has(t.id)) dashboardLayout.order.push(t.id);
+  }
   saveDashboard();
 
   // Véhicules
